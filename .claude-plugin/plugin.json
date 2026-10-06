@@ -1,1 +1,1 @@
-{ "name": "bash-status", "version": "0.3.0", "description": "Shows each running Bash command's description on the spinner line and its transcript row", "types": "./types/index.d.ts" }
+{ "name": "tool-status", "version": "0.4.1", "description": "Shows what each tool call is doing on the spinner line and its transcript row, and how long ago the last one finished", "types": "./types/index.d.ts" }
