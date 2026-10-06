@@ -1,0 +1,1 @@
+{ "name": "bash-status", "version": "0.3.0", "description": "Shows each running Bash command's description on the spinner line and its transcript row", "types": "./types/index.d.ts" }
