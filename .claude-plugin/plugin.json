@@ -1,1 +1,1 @@
-{ "name": "tool-status", "version": "0.4.1", "description": "Shows what each tool call is doing on the spinner line and its transcript row, and how long ago the last one finished", "types": "./types/index.d.ts" }
+{ "name": "tool-status", "version": "0.5.0", "description": "Shows what each tool call is doing on the spinner line and its transcript row, how long ago the last one finished, and lets /tool-output switch tool rows to a compact layout", "types": "./types/index.d.ts" }
