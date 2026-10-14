@@ -1,7 +1,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
-import type { Register, Timer } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Finished, Head, Running } from '../types'
+import type { Finished, Head, Running, View } from '../types'
 
 // The tool calls in flight, oldest first. Parallel calls share the one spinner
 // line, so it shows the newest and counts the rest.
@@ -10,14 +10,21 @@ const running = atom({ plugin: 'tool-status', key: 'running' } as const, [] as R
 const last = atom({ plugin: 'tool-status', key: 'last' } as const, null as Finished | null)
 // The time the age is measured to; ticks once a second while a turn shows it.
 const now = atom({ plugin: 'tool-status', key: 'now' } as const, 0)
-// Whether tool rows draw the compact layout; /tool-output flips it, $.store keeps it.
-const compact = atom({ plugin: 'tool-status', key: 'compact' } as const, false)
+// How much of each call tool rows draw; /tool-output sets it, $.store keeps it.
+const view = atom({ plugin: 'tool-status', key: 'view' } as const, 'full' as View)
 // The head of what each call returned, by its tool_use_id: the one text every
 // tool has (`tool.call`'s `text`), where the result's own shape varies by tool.
 const outputs = atom({ plugin: 'tool-status', key: 'outputs' } as const, null as Head | null)
 
 const INPUT_LINES = 10
 const OUTPUT_LINES = 5
+const VIEWS: readonly View[] = ['none', 'compact', 'inputs', 'full']
+const SAYS: Record<View, string> = {
+  none: 'Tool rows show only the description.',
+  compact: `Tool rows show ${INPUT_LINES} lines of input and ${OUTPUT_LINES} of output.`,
+  inputs: 'Tool rows show their input, not their output.',
+  full: 'Tool rows show their full input and output.',
+}
 
 // The input fields that say what a call is doing, most telling first.
 const FIELDS = ['description', 'file_path', 'notebook_path', 'pattern', 'url', 'query', 'skill', 'subject', 'prompt', 'command', 'message']
@@ -63,13 +70,11 @@ export function age(ms: number): string {
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
 }
 
-// `/tool-output` alone flips it; null for an argument it does not know.
-export function toggled(args: string, isCompact: boolean): boolean | null {
+// `/tool-output` alone steps to the next view; null for an argument it does not know.
+export function chosen(args: string, current: View): View | null {
   const arg = args.trim().toLowerCase()
-  if (arg === '') return !isCompact
-  if (arg === 'compact') return true
-  if (arg === 'full') return false
-  return null
+  if (arg === '') return VIEWS[(VIEWS.indexOf(current) + 1) % VIEWS.length] ?? 'full'
+  return VIEWS.find(v => v === arg) ?? null
 }
 
 // Kept lines are cut at 500 characters: each is drawn on one row anyway, and a
@@ -80,12 +85,13 @@ export function head(text: string, count: number): Head {
   return { lines: lines.slice(0, count).map(l => l.slice(0, 500)), more: Math.max(0, lines.length - count) }
 }
 
-// Each text field cut to its head, for the engine's own header to draw: a rewritten
-// `input` changes the row alone, the call having already run.
+// Each text field cut to its head (emptied at 0), for the engine's own header to
+// draw: a rewritten `input` changes the row alone, the call having already run.
 export function capped(input: unknown, count: number): unknown {
   if (typeof input !== 'object' || input === null) return input
   return Object.fromEntries(Object.entries(input).map(([key, value]) => {
     if (typeof value !== 'string') return [key, value]
+    if (count === 0) return [key, '']
     const { lines, more } = head(value, count)
     return [key, more > 0 ? `${lines.join('\n')}\n… +${more} lines` : value]
   }))
@@ -100,27 +106,36 @@ export function storedText(output: unknown): string | undefined {
   return typeof stderr === 'string' && stderr !== '' ? `${stdout}\n${stderr}` : stdout
 }
 
+// Sets the view `args` names, or the next one; null for a name it does not know.
+async function choose($: EngineInterface, args: string): Promise<View | null> {
+  const picked = chosen(args, await read($, view))
+  if (picked === null) return null
+  await update($, view, () => picked)
+  await $.store.set('view', picked)
+  return picked
+}
+
 export const register: Register = on => {
   let ticker: Timer | undefined
 
   on('session.start', async ($, e, next) => {
-    const stored = await $.store.get('compact')
-    if (typeof stored === 'boolean') await update($, compact, () => stored)
+    // `compact: true` is what 0.5.0 stored before there were four views.
+    const stored = (await $.store.get('view')) ?? ((await $.store.get('compact')) === true ? 'compact' : undefined)
+    const known = VIEWS.find(v => v === stored)
+    if (known !== undefined) await update($, view, () => known)
     await $.command.register({
       name: 'tool-output',
-      description: `Switch tool rows between full output and a compact layout (${INPUT_LINES} lines of input, the description whole, ${OUTPUT_LINES} of output)`,
-      argumentHint: '[full|compact]',
+      description: `Choose what tool rows show: none (the description), compact (${INPUT_LINES} lines of input, ${OUTPUT_LINES} of output), inputs, or full`,
+      argumentHint: '[none|compact|inputs|full]',
       immediate: true,
     })
     return next(e)
   })
 
   on('command.run', { command: 'tool-output' }, async ($, e) => {
-    const isCompact = toggled(e.args, await read($, compact))
-    if (isCompact === null) return { text: `Unknown argument "${e.args.trim()}": use full, compact, or nothing to toggle.` }
-    await update($, compact, () => isCompact)
-    await $.store.set('compact', isCompact)
-    return { text: isCompact ? 'Tool rows are compact.' : 'Tool rows show their full output.' }
+    const picked = await choose($, e.args)
+    if (picked === null) return { text: `Unknown argument "${e.args.trim()}": use ${VIEWS.join(', ')}, or nothing for the next one.` }
+    return { text: SAYS[picked] }
   })
 
   on('turn.start', ($, e, next) => {
@@ -178,27 +193,49 @@ export const register: Register = on => {
     return next({ ...e, props: { ...e.props, message } })
   })
 
-  // Keeps what a call was doing on its own transcript row, dim, under its
+  // Keeps what a call was doing on its own transcript row, under its
   // header. Rows folded into a group's count line are not drawn one by one.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
-    const isCompact = await read($, compact)
-    const row = await next(isCompact ? { ...e, props: { ...e.props, input: capped(e.props.input, INPUT_LINES) } } : e)
-    const { Box, Text } = $.ui.resolve(e)
-    // The header already draws the call's input (`Bash(ls -la)`), so compact adds
-    // only the description, wrapped rather than cut.
-    const value = isCompact ? mainOf(e.props.input) : valueOf(e.props.input)
+    const shown = await read($, view)
+    const lines = shown === 'none' ? 0 : shown === 'compact' ? INPUT_LINES : undefined
+    const row = await next(lines === undefined ? e : { ...e, props: { ...e.props, input: capped(e.props.input, lines) } })
+    const { Box, Button, Text } = $.ui.resolve(e)
+    // The header already draws the call's input (`Bash(ls -la)`), so the line under
+    // it adds only the description, whole outside the full view.
+    const value = shown === 'full' ? valueOf(e.props.input) : mainOf(e.props.input)
     if (value === undefined) return row
+    const press = () => choose($, '')
+    let description
+    try {
+      // The spinner's color, by the theme's key so it follows light and dark.
+      description = (
+        <Button key="view" plain onPress={press}>
+          <Text bold color="claude">{value}</Text>
+        </Button>
+      )
+    } catch {
+      // 2.1.291, the `claude --previous` build, refuses a Button any child but a string.
+      description = <Button key="view" plain label={value} onPress={press} />
+    }
     return (
       <Box flexDirection="column">
         {row}
-        <Text dimColor>  ↳ {value}</Text>
+        <Box flexDirection="row">
+          <Text dimColor>  ↳ </Text>
+          {description}
+        </Box>
       </Box>
     )
   })
 
   // Lines are cut at the edge, not wrapped, so the head stays that many rows.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
-    if (!(await read($, compact))) return next(e)
+    const current = await read($, view)
+    if (current === 'full') return next(e)
+    if (current !== 'compact') {
+      const { Box } = $.ui.resolve(e)
+      return <Box />
+    }
     const stored = storedText(e.props.output)
     const shown = (await read($, memberOf(outputs, e))) ?? (stored === undefined ? null : head(stored, OUTPUT_LINES))
     if (shown === null) return next(e)

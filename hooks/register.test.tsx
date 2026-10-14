@@ -1,7 +1,7 @@
 import { test, expect, mock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { age, capped, firstWords, head, labelOf, storedText, toggled } from './register'
+import { age, capped, chosen, firstWords, head, labelOf, storedText } from './register'
 
 const SPINNER = {
   plugin: 'tool-status',
@@ -103,25 +103,47 @@ const row = (tool: string, input: unknown) => ({
   props: { tool_use_id: 'toolu_1', tool, input, isRunning: false, isErrored: false, isInterrupted: false },
 } as const)
 
-test('every tool row carries what its call was doing in a dim line under the header', async ($, on) => {
+test('every tool row carries what its call was doing under the header: a dim arrow, then a button of it in bold in the spinner color that steps the view', async ($, on) => {
+  mock.store(on)
   on('ui.render', { component: 'ToolUse' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>{e.props.tool}(…)</Text>
   })
+  on('ui.render', { component: 'ToolResult' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>full output</Text>
+  })
   for (const surface of ['terminal', 'desktop'] as const) {
     for (const [tool, input, shown] of [
-      ['Bash', { command: 'ls', description: 'List files' }, '  ↳ List files'],
-      ['Read', { file_path: '/x/y.ts' }, '  ↳ /x/y.ts'],
+      ['Bash', { command: 'ls', description: 'List files' }, 'List files'],
+      ['Read', { file_path: '/x/y.ts' }, '/x/y.ts'],
       ['TodoWrite', { todos: [] }, undefined],
     ] as const) {
       const ui = await $.ui.mount({ ...row(tool, input), surface })
       expect(await ui.find({ type: 'Text', text: `${tool}(…)` })).toBeDefined()
-      const line = await ui.find({ type: 'Text', text: /↳/ })
-      expect(line?.text).toBe(shown)
-      if (line) expect(line.props.dimColor).toBe(true)
+      const button = await ui.find({ type: 'Button' })
+      expect(button === undefined).toBe(shown === undefined)
+      if (button) {
+        expect(button.props).toMatchObject({ plain: true })
+        expect(button.props.action).toBeUndefined()
+        expect((await ui.find({ type: 'Text', text: '  ↳ ' }))?.props.dimColor).toBe(true)
+        expect((await ui.find({ type: 'Text', text: shown }))?.props).toMatchObject({ bold: true, color: 'claude' })
+      }
       await ui.unmount()
     }
   }
+  const ui = await $.ui.mount({ ...row('Bash', { command: 'ls', description: 'List files' }), surface: 'terminal' })
+  const output = async () => {
+    const drawn = await $.ui.mount({ ...result('toolu_old', 'Bash', { stdout: 'hello', stderr: '' }), surface: 'terminal' })
+    const texts = (await drawn.findAll({ type: 'Text' })).map(t => t.text)
+    await drawn.unmount()
+    return texts
+  }
+  await ui.press({ plugin: 'tool-status', key: 'view' })
+  expect(await output()).toEqual([])
+  await ui.press({ plugin: 'tool-status', key: 'view' })
+  expect(await output()).toEqual(['  ⎿ hello'])
+  await ui.unmount()
 })
 
 const result = (id: string, tool: string, output: unknown, isErrored = false) => ({
@@ -133,15 +155,21 @@ const result = (id: string, tool: string, output: unknown, isErrored = false) =>
 
 const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join('\n')
 
-test('/tool-output alone flips; full and compact set; heads keep the first lines and count the rest', () => {
-  expect([toggled('', false), toggled(' ', true), toggled('compact', false), toggled('FULL', true)]).toEqual([true, false, true, false])
-  expect(toggled('on', true)).toBe(null)
+test('/tool-output alone steps through the views; a name sets one; heads keep the first lines and count the rest', () => {
+  expect([chosen('', 'none'), chosen(' ', 'compact'), chosen('', 'inputs'), chosen('', 'full')]).toEqual(['compact', 'inputs', 'full', 'none'])
+  expect([chosen('INPUTS', 'none'), chosen('none', 'full')]).toEqual(['inputs', 'none'])
+  expect(chosen('on', 'full')).toBe(null)
   expect(head(lines(7), 5)).toEqual({ lines: ['line 1', 'line 2', 'line 3', 'line 4', 'line 5'], more: 2 })
   expect(head('one\n\n', 5)).toEqual({ lines: ['one'], more: 0 })
   expect(head('  \n', 5)).toEqual({ lines: [], more: 0 })
   expect(capped({ command: 'a\nb\nc', description: 'x', timeout: 5 }, 2)).toEqual({ command: 'a\nb\n… +1 lines', description: 'x', timeout: 5 })
+  expect(capped({ command: 'a\nb', description: 'x', timeout: 5 }, 0)).toEqual({ command: '', description: '', timeout: 5 })
   expect([storedText('text'), storedText({ stdout: 'out', stderr: 'err' }), storedText({ file: {} })]).toEqual(['text', 'out\nerr', undefined])
 })
+
+// What the engine stamps on a command typed at the prompt.
+const typed = (args: string) =>
+  ({ command: 'tool-output', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } }) as const
 
 function session(on: On, stored: Record<string, unknown> = {}) {
   mock.store(on, stored)
@@ -159,47 +187,59 @@ function session(on: On, stored: Record<string, unknown> = {}) {
   const ids: Record<string, string> = {}
   on('tool.call', ($, e) => {
     ids[e.tool] = e.tool_use_id
-    return e.tool === 'Grep' ? { isError: true, result: 'bad regex', text: 'bad regex' } : { ...OK, text: lines(7) }
+    return e.tool === 'WebFetch' ? { isError: true, result: 'bad url', text: 'bad url' } : { ...OK, text: lines(7) }
   })
   return ids
 }
 
-test('compact rows cut the header\'s input to 10 lines, show the description whole and 5 lines of output, errors alike, and /tool-output full restores the engine\'s', async ($, on) => {
+test('compact cuts the header\'s input to 10 lines and shows 5 of output, inputs drops the output, none the input too, full restores the engine\'s; the description stays', async ($, on) => {
   const ids = session(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const input = { command: lines(12), description: 'Count' }
   await $.tool.call({ tool: 'Bash', ...input })
-  await $.tool.call({ tool: 'Grep', pattern: '(' })
-  expect((await $.command.run({ command: 'tool-output', args: '' })).text).toBe('Tool rows are compact.')
+  await $.tool.call({ tool: 'WebFetch', url: 'bad', prompt: 'p' })
+  expect((await $.command.run(typed('compact'))).text).toBe('Tool rows show 10 lines of input and 5 of output.')
   for (const surface of ['terminal', 'desktop'] as const) {
     const texts = async (ui: { findAll: (q: { type: 'Text' }) => Promise<Array<{ text?: string }>> }) => (await ui.findAll({ type: 'Text' })).map(t => t.text)
     const use = await $.ui.mount({ ...row('Bash', input), requestId: ids.Bash, surface })
-    expect(await texts(use)).toEqual([`Bash(${lines(10)}\n… +2 lines)`, '  ↳ Count'])
+    expect(await texts(use)).toEqual([`Bash(${lines(10)}\n… +2 lines)`, '  ↳ ', 'Count'])
     const long = 'Fetch the npm publish dates for every recent version of the package and compare them'
     const short = await $.ui.mount({ ...row('Bash', { command: 'ls', description: long, timeout: 5 }), surface })
-    expect(await texts(short)).toEqual(['Bash(ls)', `  ↳ ${long}`])
+    expect(await texts(short)).toEqual(['Bash(ls)', '  ↳ ', long])
     const bare = await $.ui.mount({ ...row('TodoWrite', { todos: [] }), surface })
     expect(await texts(bare)).toEqual(['TodoWrite(…)'])
     const bash = await $.ui.mount({ ...result(ids.Bash ?? '', 'Bash', OK.result), surface })
     expect(await texts(bash)).toEqual(['  ⎿ line 1', '    line 2', '    line 3', '    line 4', '    line 5', '    … +2 lines'])
-    const grep = await $.ui.mount({ ...result(ids.Grep ?? '', 'Grep', 'bad regex', true), surface })
-    expect(await texts(grep)).toEqual(['  ⎿ bad regex'])
+    const fetch = await $.ui.mount({ ...result(ids.WebFetch ?? '', 'WebFetch', 'bad url', true), surface })
+    expect(await texts(fetch)).toEqual(['  ⎿ bad url'])
     const resumed = await $.ui.mount({ ...result('toolu_old', 'Bash', { stdout: '', stderr: '' }), surface })
     expect(await texts(resumed)).toEqual(['  ⎿ (no output)'])
 
-    expect((await $.command.run({ command: 'tool-output', args: 'full' })).text).toBe('Tool rows show their full output.')
+    expect((await $.command.run(typed('inputs'))).text).toBe('Tool rows show their input, not their output.')
+    expect(await texts(use)).toEqual([`Bash(${lines(12)})`, '  ↳ ', 'Count'])
+    expect([await texts(bash), await texts(fetch)]).toEqual([[], []])
+    expect((await $.command.run(typed('none'))).text).toBe('Tool rows show only the description.')
+    expect(await texts(use)).toEqual(['Bash()', '  ↳ ', 'Count'])
+    expect([await texts(bash), await texts(fetch)]).toEqual([[], []])
+    expect((await $.command.run(typed('full'))).text).toBe('Tool rows show their full input and output.')
     expect(await texts(bash)).toEqual(['full output'])
-    expect(await texts(use)).toEqual([`Bash(${lines(12)})`, '  ↳ Count'])
-    await $.command.run({ command: 'tool-output', args: 'compact' })
-    for (const ui of [use, short, bare, bash, grep, resumed]) await ui.unmount()
+    expect(await texts(use)).toEqual([`Bash(${lines(12)})`, '  ↳ ', 'Count'])
+    await $.command.run(typed('compact'))
+    for (const ui of [use, short, bare, bash, fetch, resumed]) await ui.unmount()
   }
-  expect((await $.command.run({ command: 'tool-output', args: 'x' })).text).toMatch(/^Unknown argument "x"/)
+  expect((await $.command.run(typed('x'))).text).toMatch(/^Unknown argument "x"/)
 })
 
-test('a new session starts compact when it was left compact', async ($, on) => {
-  session(on, { compact: true })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  const ui = await $.ui.mount({ ...result('toolu_old', 'Bash', { stdout: 'hello', stderr: '' }), surface: 'terminal' })
-  expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toEqual(['  ⎿ hello'])
-  await ui.unmount()
-})
+for (const [left, stored, drawn] of [
+  ['inputs', { view: 'inputs' }, []],
+  ['compact by 0.5.0', { compact: true }, ['  ⎿ hello']],
+  ['nothing', {}, ['full output']],
+] as const) {
+  test(`a new session starts in the view it was left in: ${left}`, async ($, on) => {
+    session(on, stored)
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    const ui = await $.ui.mount({ ...result('toolu_old', 'Bash', { stdout: 'hello', stderr: '' }), surface: 'terminal' })
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toEqual(drawn)
+    await ui.unmount()
+  })
+}
