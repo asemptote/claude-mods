@@ -1,20 +1,24 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Finished, Head, Running, View } from '../types'
+import type { Diff, Finished, Head, Running, Timing, View } from '../types'
 
 // The tool calls in flight, oldest first. Parallel calls share the one spinner
-// line, so it shows the newest and counts the rest.
+// line, so it names the newest's tool, counts the rest, and puts what the
+// newest is doing, whole, on the line under it.
 const running = atom({ plugin: 'tool-status', key: 'running' } as const, [] as Running[])
 // The call that finished last, shown with its age while nothing runs.
 const last = atom({ plugin: 'tool-status', key: 'last' } as const, null as Finished | null)
-// The time the age is measured to; ticks once a second while a turn shows it.
+// The time ages are measured to: the idle line's, and a running row's elapsed
+// time. Ticks once a second while a turn shows either.
 const now = atom({ plugin: 'tool-status', key: 'now' } as const, 0)
 // How much of each call tool rows draw; /tool-output sets it, $.store keeps it.
 const view = atom({ plugin: 'tool-status', key: 'view' } as const, 'full' as View)
 // The head of what each call returned, by its tool_use_id: the one text every
 // tool has (`tool.call`'s `text`), where the result's own shape varies by tool.
 const outputs = atom({ plugin: 'tool-status', key: 'outputs' } as const, null as Head | null)
+// When each call started and, once it ends, how long it ran, by its tool_use_id.
+const timings = atom({ plugin: 'tool-status', key: 'timings' } as const, null as Timing | null)
 
 const INPUT_LINES = 10
 const OUTPUT_LINES = 5
@@ -48,19 +52,9 @@ export function valueOf(input: unknown): string | undefined {
   return text.length > 80 ? `${text.slice(0, 79)}…` : text
 }
 
-// A Bash call's description stands alone; any other call is named by its tool.
-export function labelOf(tool: string, input: unknown): string {
-  const description = (input as { description?: unknown } | null)?.description
-  if (tool === 'Bash' && typeof description === 'string' && description !== '') return description
-  const value = valueOf(input)
-  return value === undefined ? tool : `${tool} ${value}`
-}
-
-// The idle line keeps only the start of the last call's label, short enough for
-// a narrow terminal; the spinner's own ellipsis follows it.
-export function firstWords(label: string): string {
-  const words = label.split(/\s+/).slice(0, 3).join(' ')
-  return words.length > 32 ? words.slice(0, 32) : words
+// A finished call's run time: tenths under ten seconds, where most calls land.
+export function took(ms: number): string {
+  return ms < 10_000 ? `${(Math.max(0, ms) / 1000).toFixed(1)}s` : age(ms)
 }
 
 export function age(ms: number): string {
@@ -106,6 +100,31 @@ export function storedText(output: unknown): string | undefined {
   return typeof stderr === 'string' && stderr !== '' ? `${stdout}\n${stderr}` : stdout
 }
 
+type Hunk = { lines?: unknown }
+const counted = (hunks: Hunk[]) => hunks.flatMap(h => (Array.isArray(h.lines) ? h.lines : [])).reduce(
+  (n: Diff, line) => typeof line !== 'string' ? n
+    : line.startsWith('+') ? { added: n.added + 1, removed: n.removed }
+    : line.startsWith('-') ? { added: n.added, removed: n.removed + 1 } : n,
+  { added: 0, removed: 0 },
+)
+
+// The lines a call added and removed, from the patch its stored result carries:
+// Edit's and Write's `structuredPatch`, a Bash call's `bashEditDiff`. A Write
+// that creates a file may carry no patch, so its content is the count.
+export function diffOf(output: unknown): Diff | undefined {
+  if (typeof output !== 'object' || output === null) return undefined
+  const o = output as { staged?: unknown; structuredPatch?: unknown; type?: unknown; content?: unknown; originalFile?: unknown; bashEditDiff?: unknown }
+  if (o.staged === true) return undefined
+  if (Array.isArray(o.structuredPatch)) {
+    if (o.structuredPatch.length > 0) return counted(o.structuredPatch as Hunk[])
+    if (o.type === 'create' && typeof o.content === 'string') return { added: head(o.content, 0).more, removed: 0 }
+    return typeof o.originalFile === 'string' ? { added: 0, removed: 0 } : undefined
+  }
+  const files = (o.bashEditDiff as { files?: unknown } | undefined)?.files
+  if (!Array.isArray(files) || files.length === 0) return undefined
+  return counted(files.flatMap((f: { hunks?: unknown }) => (Array.isArray(f.hunks) ? f.hunks as Hunk[] : [])))
+}
+
 // Sets the view `args` names, or the next one; null for a name it does not know.
 async function choose($: EngineInterface, args: string): Promise<View | null> {
   const picked = chosen(args, await read($, view))
@@ -140,8 +159,8 @@ export const register: Register = on => {
 
   on('turn.start', ($, e, next) => {
     ticker ??= $.clock.every(1000, async () => {
-      // Only the idle line shows an age; a write redraws just the spinner.
-      if ((await read($, running)).length === 0 && (await read($, last)) !== null) {
+      // A write redraws only what reads it: the idle line, and running rows.
+      if ((await read($, running)).length > 0 || (await read($, last)) !== null) {
         const t = await $.clock.now()
         await update($, now, () => t)
       }
@@ -159,8 +178,13 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const id = e.tool_use_id
-    const label = labelOf(e.tool, e)
-    await update($, running, all => [...all, { id, label }])
+    const label = e.tool
+    const detail = mainOf(e)
+    const timing = memberOf(timings, { requestId: id })
+    const startedAt = await $.clock.now()
+    await update($, now, () => startedAt)
+    await update($, timing, () => ({ startedAt }))
+    await update($, running, all => [...all, { id, label, detail }])
     try {
       const result = await next(e)
       const text = 'deny' in result && result.deny !== undefined ? result.deny : result.text
@@ -169,8 +193,9 @@ export const register: Register = on => {
     } finally {
       await update($, running, all => all.filter(r => r.id !== id))
       const endedAt = await $.clock.now()
+      await update($, timing, () => ({ startedAt, ms: endedAt - startedAt }))
       await update($, now, () => endedAt)
-      await update($, last, () => ({ label, endedAt }))
+      await update($, last, () => ({ label, detail, endedAt }))
     }
   })
     // A failure here must never cost the call, nor leave it on the spinner.
@@ -182,15 +207,29 @@ export const register: Register = on => {
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
     const all = await read($, running)
     const newest = all.at(-1)
+    const finished = newest === undefined ? await read($, last) : null
+    let message, detail
     if (newest !== undefined) {
-      const message = all.length > 1 ? `${newest.label} (+${all.length - 1} more)` : newest.label
-      return next({ ...e, props: { ...e.props, message } })
+      message = all.length > 1 ? `${newest.label} (+${all.length - 1} more)` : newest.label
+      detail = newest.detail
+    } else if (finished !== null && e.props.message === null) {
+      message = `${age((await read($, now)) - finished.endedAt)} ago · ${finished.label}`
+      detail = finished.detail
+    } else {
+      // A message the engine set (compacting, a retry) outranks the idle line.
+      return next(e)
     }
-    const finished = await read($, last)
-    // A message the engine set (compacting, a retry) outranks the idle line.
-    if (finished === null || e.props.message !== null) return next(e)
-    const message = `${age((await read($, now)) - finished.endedAt)} ago · ${firstWords(finished.label)}`
-    return next({ ...e, props: { ...e.props, message } })
+    const line = await next({ ...e, props: { ...e.props, message } })
+    if (detail === undefined) return line
+    const { Box, Text } = $.ui.resolve(e)
+    // Under the message, past the engine's two-cell glyph, wrapping there; bold
+    // in the spinner's color by the theme's key, as the rows' descriptions are.
+    return (
+      <Box flexDirection="column">
+        {line}
+        <Box paddingLeft={2}><Text bold color="claude">{detail}</Text></Box>
+      </Box>
+    )
   })
 
   // Keeps what a call was doing on its own transcript row, under its
@@ -203,26 +242,38 @@ export const register: Register = on => {
     // The header already draws the call's input (`Bash(ls -la)`), so the line under
     // it adds only the description, whole outside the full view.
     const value = shown === 'full' ? valueOf(e.props.input) : mainOf(e.props.input)
-    if (value === undefined) return row
+    // Only calls this session ran have a time; a resumed row's result holds none.
+    const timing = await read($, memberOf(timings, { requestId: e.props.tool_use_id }))
+    const time = timing === null ? undefined
+      : timing.ms !== undefined ? took(timing.ms)
+      : e.props.isRunning ? age((await read($, now)) - timing.startedAt) : undefined
+    if (value === undefined && time === undefined) return row
+    const diff = diffOf(e.props.output)
     const press = () => choose($, '')
     let description
-    try {
+    if (value !== undefined) try {
       // The spinner's color, by the theme's key so it follows light and dark.
       description = (
         <Button key="view" plain onPress={press}>
           <Text bold color="claude">{value}</Text>
+          {time !== undefined && <Text dimColor>{` ${time}`}</Text>}
         </Button>
       )
     } catch {
       // 2.1.291, the `claude --previous` build, refuses a Button any child but a string.
-      description = <Button key="view" plain label={value} onPress={press} />
+      description = <Button key="view" plain label={time === undefined ? value : `${value} ${time}`} onPress={press} />
     }
     return (
       <Box flexDirection="column">
         {row}
         <Box flexDirection="row">
           <Text dimColor>  ↳ </Text>
-          {description}
+          {diff && <Text color="success">+{diff.added}</Text>}
+          {diff && <Text dimColor>/</Text>}
+          {diff && <Text color="error">-{diff.removed} </Text>}
+          {/* A Button's own box never shrinks: alone in the row it overran the
+              edge and squeezed the arrow and the time into slivers. */}
+          <Box flexDirection="column" flexShrink={1}>{description ?? <Text dimColor>{time}</Text>}</Box>
         </Box>
       </Box>
     )

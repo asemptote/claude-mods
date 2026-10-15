@@ -1,7 +1,7 @@
 import { test, expect, mock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { age, capped, chosen, firstWords, head, labelOf, storedText } from './register'
+import { age, capped, chosen, diffOf, head, mainOf, storedText, took } from './register'
 
 const SPINNER = {
   plugin: 'tool-status',
@@ -12,7 +12,8 @@ const SPINNER = {
 const OK = { result: { stdout: '', stderr: '', interrupted: false } }
 
 // Stands for the engine beneath the plugin: draws the spinner's message (else
-// its word), echoes turns, and holds every tool call until its gate opens.
+// its word), echoes turns, and holds every tool call until its gate opens,
+// noting its id.
 function engine(on: On) {
   on('ui.render', { component: 'Spinner' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -21,53 +22,53 @@ function engine(on: On) {
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   const gates: Array<() => void> = []
+  const ids: string[] = []
   let calls = 0
-  on('tool.call', async () => {
+  on('tool.call', async ($, e) => {
+    ids.push(e.tool_use_id)
     calls += 1
     await new Promise<void>(r => gates.push(r))
     return OK
   })
-  return { gates, calls: () => calls }
+  return { gates, ids, calls: () => calls }
 }
 
-test('labels: a Bash description alone, any other call by tool and its main field', () => {
-  expect(labelOf('Bash', { command: 'ls', description: 'List files' })).toBe('List files')
-  expect(labelOf('Bash', { command: 'ls' })).toBe('Bash ls')
-  expect(labelOf('Read', { file_path: '/x/y.ts' })).toBe('Read /x/y.ts')
-  expect(labelOf('Agent', { description: 'Find docs', prompt: 'long…' })).toBe('Agent Find docs')
-  expect(labelOf('TodoWrite', { todos: [] })).toBe('TodoWrite')
+test('what a call is doing: its most telling field\'s first line, whole', () => {
+  expect(mainOf({ command: 'ls', description: 'List files' })).toBe('List files')
+  expect(mainOf({ command: 'ls -la\nwc -l' })).toBe('ls -la')
+  expect(mainOf({ file_path: '/x/y.ts' })).toBe('/x/y.ts')
+  expect(mainOf({ description: 'Find docs', prompt: 'long…' })).toBe('Find docs')
+  expect(mainOf({ todos: [] })).toBeUndefined()
   expect([age(0), age(59_999), age(65_000), age(3_725_000)]).toEqual(['0s', '59s', '1m 5s', '1h 2m'])
-  expect(firstWords('List files')).toBe('List files')
-  expect(firstWords('Fetch npm publish dates for recent versions')).toBe('Fetch npm publish')
-  expect(firstWords('Read /home/user/.claude/settings.json')).toBe('Read /home/user/.claude/settings')
 })
 
-test('the spinner shows running calls, then the last one with its age, ticking until the turn ends', async ($, on) => {
+test('the spinner names the running call\'s tool with what it is doing whole under it, bold in the spinner\'s color, then the last one with its age, ticking until the turn ends', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const { gates } = engine(on)
   const ui = await $.ui.mount({ ...SPINNER, surface: 'terminal' })
-  const text = async () => (await ui.find({ type: 'Text' }))?.text
-  expect(await text()).toBe('')
+  const text = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(await text()).toEqual([''])
 
   await $.turn.start({ text: 'hi', turnId: 't1' })
   const bash = $.tool.call({ tool: 'Bash', command: 'ls', description: 'List files in the home directory' })
   const read = $.tool.call({ tool: 'Read', file_path: '/x/y.ts' })
   await clock.settle()
-  expect(await text()).toBe('Read /x/y.ts (+1 more)')
+  expect(await text()).toEqual(['Read (+1 more)', '/x/y.ts'])
 
   gates[1]?.()
   await read
-  expect(await text()).toBe('List files in the home directory')
+  expect(await text()).toEqual(['Bash', 'List files in the home directory'])
+  expect((await ui.find({ type: 'Text', text: 'List files in the home directory' }))?.props).toMatchObject({ bold: true, color: 'claude' })
   gates[0]?.()
   await bash
-  expect(await text()).toBe('0s ago · List files in')
+  expect(await text()).toEqual(['0s ago · Bash', 'List files in the home directory'])
 
   await clock.advance(65_000)
-  expect(await text()).toBe('1m 5s ago · List files in')
+  expect(await text()).toEqual(['1m 5s ago · Bash', 'List files in the home directory'])
 
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(10_000)
-  expect(await text()).toBe('1m 5s ago · List files in')
+  expect(await text()).toEqual(['1m 5s ago · Bash', 'List files in the home directory'])
   await ui.unmount()
 })
 
@@ -173,6 +174,7 @@ const typed = (args: string) =>
 
 function session(on: On, stored: Record<string, unknown> = {}) {
   mock.store(on, stored)
+  mock.clock(on)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.render', { component: 'ToolResult' }, ($, e) => {
@@ -243,3 +245,68 @@ for (const [left, stored, drawn] of [
     await ui.unmount()
   })
 }
+
+const patch = (...lines: string[]) => [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 3, lines }]
+
+test('calls that edit files count the lines they added and removed; others, and staged ones, count none', () => {
+  expect(diffOf({ structuredPatch: patch(' a', '-b', '+c', '+d', '\\ No newline at end of file') })).toEqual({ added: 2, removed: 1 })
+  expect(diffOf({ type: 'create', content: 'a\nb\nc\n', structuredPatch: [], originalFile: null })).toEqual({ added: 3, removed: 0 })
+  expect(diffOf({ type: 'update', content: 'a', structuredPatch: [], originalFile: 'a' })).toEqual({ added: 0, removed: 0 })
+  expect(diffOf({ type: 'update', content: 'a', structuredPatch: [], originalFile: null })).toBeUndefined()
+  expect(diffOf({ structuredPatch: patch('+a'), staged: true })).toBeUndefined()
+  const files = [{ filePath: '/a', hunks: patch('+x', '-y') }, { filePath: '/b', hunks: patch('+z'), created: true }]
+  expect(diffOf({ stdout: '', stderr: '', bashEditDiff: { files, moreFiles: 0 } })).toEqual({ added: 2, removed: 1 })
+  expect(diffOf({ stdout: '', stderr: '', bashEditDiff: { files: [], moreFiles: 0, unavailable: true } })).toBeUndefined()
+  expect([diffOf({ stdout: 'x', stderr: '' }), diffOf('File has not been read yet'), diffOf(undefined)]).toEqual([undefined, undefined, undefined])
+})
+
+test('an edit\'s row puts +added in green and -removed in red before its description, once it has run', async ($, on) => {
+  mock.store(on)
+  on('ui.render', { component: 'ToolUse' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.tool}(…)</Text>
+  })
+  const input = { file_path: '/x/y.ts', old_string: 'b', new_string: 'c\nd' }
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const done = await $.ui.mount({ ...row('Edit', input), props: { ...row('Edit', input).props, output: { structuredPatch: patch('-b', '+c', '+d') } }, surface })
+    expect((await done.findAll({ type: 'Text' })).map(t => t.text)).toEqual(['Edit(…)', '  ↳ ', '+2', '/', '-1 ', '/x/y.ts'])
+    expect((await done.find({ type: 'Text', text: '+2' }))?.props.color).toBe('success')
+    expect((await done.find({ type: 'Text', text: '-1 ' }))?.props.color).toBe('error')
+    const running = await $.ui.mount({ ...row('Edit', input), props: { ...row('Edit', input).props, isRunning: true }, surface })
+    expect((await running.findAll({ type: 'Text' })).map(t => t.text)).toEqual(['Edit(…)', '  ↳ ', '/x/y.ts'])
+    await done.unmount()
+    await running.unmount()
+  }
+})
+
+test('each row the session ran ends in its time, inside the description\'s button so the two wrap as one run, counting up while it runs and fixed once it ends', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const { gates, ids } = engine(on)
+  on('ui.render', { component: 'ToolUse' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.tool}(…)</Text>
+  })
+  expect([took(0), took(340), took(9_960), took(65_000)]).toEqual(['0.0s', '0.3s', '10.0s', '1m 5s'])
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  const call = $.tool.call({ tool: 'Bash', command: 'sleep 3', description: 'Wait' })
+  const todo = $.tool.call({ tool: 'TodoWrite', todos: [] })
+  await clock.settle()
+  const mount = (tool: string, input: unknown, i: number, isRunning: boolean) =>
+    $.ui.mount({ ...row(tool, input), props: { ...row(tool, input).props, tool_use_id: ids[i] ?? '', isRunning }, surface: 'terminal' })
+  const texts = async (ui: Awaited<ReturnType<typeof mount>>) => (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  const live = await mount('Bash', { command: 'sleep 3', description: 'Wait' }, 0, true)
+  expect(await texts(live)).toEqual(['Bash(…)', '  ↳ ', 'Wait', ' 0s'])
+  await clock.advance(2_000)
+  expect(await texts(live)).toEqual(['Bash(…)', '  ↳ ', 'Wait', ' 2s'])
+  expect((await live.find({ type: 'Text', text: ' 2s' }))?.props.dimColor).toBe(true)
+  expect((await live.find({ type: 'Button' }))?.text).toBe('Wait 2s')
+  await clock.advance(1_400)
+  gates[0]?.()
+  gates[1]?.()
+  await Promise.all([call, todo])
+  const done = await mount('Bash', { command: 'sleep 3', description: 'Wait' }, 0, false)
+  expect(await texts(done)).toEqual(['Bash(…)', '  ↳ ', 'Wait', ' 3.4s'])
+  const bare = await mount('TodoWrite', { todos: [] }, 1, false)
+  expect(await texts(bare)).toEqual(['TodoWrite(…)', '  ↳ ', '3.4s'])
+  for (const ui of [live, done, bare]) await ui.unmount()
+})
