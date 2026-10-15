@@ -284,7 +284,7 @@ test('calls that edit files count the lines they added and removed; others, and 
   expect([diffOf({ stdout: 'x', stderr: '' }), diffOf('File has not been read yet'), diffOf(undefined)]).toEqual([undefined, undefined, undefined])
 })
 
-test('an edit\'s row puts +added in green and -removed in red before its description, once it has run', async ($, on) => {
+test('an edit\'s row puts +added in green and -removed in red before its description, inside its button so a wrapped description resumes under the count, once it has run', async ($, on) => {
   mock.store(on)
   on('ui.render', { component: 'ToolUse' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -296,6 +296,7 @@ test('an edit\'s row puts +added in green and -removed in red before its descrip
     expect((await done.findAll({ type: 'Text' })).map(t => t.text)).toEqual(['Edit(…)', '  ↳ ', '+2', '/', '-1 ', '/x/y.ts'])
     expect((await done.find({ type: 'Text', text: '+2' }))?.props.color).toBe('success')
     expect((await done.find({ type: 'Text', text: '-1 ' }))?.props.color).toBe('error')
+    expect((await done.find({ type: 'Button' }))?.text).toBe('+2/-1 /x/y.ts')
     const running = await $.ui.mount({ ...row('Edit', input), props: { ...row('Edit', input).props, isRunning: true }, surface })
     expect((await running.findAll({ type: 'Text' })).map(t => t.text)).toEqual(['Edit(…)', '  ↳ ', '/x/y.ts'])
     await done.unmount()

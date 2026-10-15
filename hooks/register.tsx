@@ -250,30 +250,29 @@ export const register: Register = on => {
     if (value === undefined && time === undefined) return row
     const diff = diffOf(e.props.output)
     const press = () => choose($, '')
-    let description
-    if (value !== undefined) try {
-      // The spinner's color, by the theme's key so it follows light and dark.
-      description = (
-        <Button key="view" plain onPress={press}>
-          <Text bold color="claude">{value}</Text>
-          {time !== undefined && <Text dimColor>{` ${time}`}</Text>}
-        </Button>
-      )
-    } catch {
-      // 2.1.291, the `claude --previous` build, refuses a Button any child but a string.
-      description = <Button key="view" plain label={time === undefined ? value : `${value} ${time}`} onPress={press} />
-    }
+    // In the description's run, not a column of its own: a description that wraps
+    // then resumes under the count instead of indented past it.
+    const counts = diff && [
+      <Text color="success">+{diff.added}</Text>,
+      <Text dimColor>/</Text>,
+      <Text color="error">-{diff.removed} </Text>,
+    ]
+    // The spinner's color, by the theme's key so it follows light and dark.
+    const description = value !== undefined && (
+      <Button key="view" plain onPress={press}>
+        {counts}
+        <Text bold color="claude">{value}</Text>
+        {time !== undefined && <Text dimColor>{` ${time}`}</Text>}
+      </Button>
+    )
     return (
       <Box flexDirection="column">
         {row}
         <Box flexDirection="row">
           <Text dimColor>  ↳ </Text>
-          {diff && <Text color="success">+{diff.added}</Text>}
-          {diff && <Text dimColor>/</Text>}
-          {diff && <Text color="error">-{diff.removed} </Text>}
           {/* A Button's own box never shrinks: alone in the row it overran the
               edge and squeezed the arrow and the time into slivers. */}
-          <Box flexDirection="column" flexShrink={1}>{description ?? <Text dimColor>{time}</Text>}</Box>
+          <Box flexDirection="column" flexShrink={1}>{description || (counts ? <Text>{counts}<Text dimColor>{time}</Text></Text> : <Text dimColor>{time}</Text>)}</Box>
         </Box>
       </Box>
     )
