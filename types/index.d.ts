@@ -1,7 +1,8 @@
 // `label` is the spinner's text, the tool's name; `detail` goes on the line under
 // it. `label` keeps its name so a full label an older load left in $.state still draws.
 export type Running = { id: string; label: string; detail?: string }
-export type Finished = { label: string; detail?: string; endedAt: number }
+// `ms`, how long it ran, is absent from a value an older load left.
+export type Finished = { label: string; detail?: string; endedAt: number; ms?: number }
 // The first lines of a text, and how many lines follow them.
 export type Head = { lines: string[]; more: number }
 // The lines a call added to and removed from files.

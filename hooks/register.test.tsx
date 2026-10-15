@@ -42,7 +42,7 @@ test('what a call is doing: its most telling field\'s first line, whole', () => 
   expect([age(0), age(59_999), age(65_000), age(3_725_000)]).toEqual(['0s', '59s', '1m 5s', '1h 2m'])
 })
 
-test('the spinner names the running call\'s tool with what it is doing whole under it, bold in the spinner\'s color, then the last one with its age, ticking until the turn ends', async ($, on) => {
+test('the spinner names the running call\'s tool with what it is doing whole under it, bold in the spinner\'s color, then the last one with its age and how long it ran, ticking until the turn ends', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const { gates } = engine(on)
   const ui = await $.ui.mount({ ...SPINNER, surface: 'terminal' })
@@ -59,17 +59,41 @@ test('the spinner names the running call\'s tool with what it is doing whole und
   await read
   expect(await text()).toEqual(['Bash', 'List files in the home directory'])
   expect((await ui.find({ type: 'Text', text: 'List files in the home directory' }))?.props).toMatchObject({ bold: true, color: 'claude' })
+  await clock.advance(3_400)
   gates[0]?.()
   await bash
-  expect(await text()).toEqual(['0s ago · Bash', 'List files in the home directory'])
+  expect(await text()).toEqual(['0s ago · Bash 3.4s', 'List files in the home directory'])
 
-  await clock.advance(65_000)
-  expect(await text()).toEqual(['1m 5s ago · Bash', 'List files in the home directory'])
+  // The ticker's seconds run from the turn's start, 0.4 s off the call's end.
+  await clock.advance(65_600)
+  expect(await text()).toEqual(['1m 5s ago · Bash 3.4s', 'List files in the home directory'])
 
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(10_000)
-  expect(await text()).toEqual(['1m 5s ago · Bash', 'List files in the home directory'])
+  expect(await text()).toEqual(['1m 5s ago · Bash 3.4s', 'List files in the home directory'])
   await ui.unmount()
+})
+
+test('a call that ends is the idle line before it leaves the spinner, never the call before it', async ($, on) => {
+  const clock = mock.clock(on)
+  const { gates } = engine(on)
+  let idle: string | undefined
+  const shownAsLeft: Array<string | undefined> = []
+  on('state.set', { plugin: 'tool-status', key: 'last' }, ($, e, next) => {
+    idle = (e.value as { detail?: string } | null)?.detail
+    return next(e)
+  })
+  on('state.set', { plugin: 'tool-status', key: 'running' }, ($, e, next) => {
+    if ((e.value as unknown[]).length === 0) shownAsLeft.push(idle)
+    return next(e)
+  })
+  for (const description of ['First', 'Second']) {
+    const call = $.tool.call({ tool: 'Bash', command: 'ls', description })
+    await clock.settle()
+    gates.at(-1)?.()
+    await call
+  }
+  expect(shownAsLeft).toEqual(['First', 'Second'])
 })
 
 test('an engine message outranks the idle line, never a running call', async ($, on) => {

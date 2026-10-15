@@ -7,10 +7,12 @@ import type { Diff, Finished, Head, Running, Timing, View } from '../types'
 // line, so it names the newest's tool, counts the rest, and puts what the
 // newest is doing, whole, on the line under it.
 const running = atom({ plugin: 'tool-status', key: 'running' } as const, [] as Running[])
-// The call that finished last, shown with its age while nothing runs.
+// The call that finished last, shown with its age and how long it ran while
+// nothing runs.
 const last = atom({ plugin: 'tool-status', key: 'last' } as const, null as Finished | null)
 // The time ages are measured to: the idle line's, and a running row's elapsed
-// time. Ticks once a second while a turn shows either.
+// time. Ticks once a second through a turn. Older than a call's own times it
+// reads as 0s, `age` flooring at zero, so a call need not write it.
 const now = atom({ plugin: 'tool-status', key: 'now' } as const, 0)
 // How much of each call tool rows draw; /tool-output sets it, $.store keeps it.
 const view = atom({ plugin: 'tool-status', key: 'view' } as const, 'full' as View)
@@ -158,12 +160,10 @@ export const register: Register = on => {
   })
 
   on('turn.start', ($, e, next) => {
+    // A write redraws only what reads it: the idle line, and running rows.
     ticker ??= $.clock.every(1000, async () => {
-      // A write redraws only what reads it: the idle line, and running rows.
-      if ((await read($, running)).length > 0 || (await read($, last)) !== null) {
-        const t = await $.clock.now()
-        await update($, now, () => t)
-      }
+      const t = await $.clock.now()
+      await update($, now, () => t)
     })
     return next(e)
   })
@@ -178,24 +178,23 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const id = e.tool_use_id
-    const label = e.tool
-    const detail = mainOf(e)
+    const call = { label: e.tool, detail: mainOf(e) }
     const timing = memberOf(timings, { requestId: id })
     const startedAt = await $.clock.now()
-    await update($, now, () => startedAt)
     await update($, timing, () => ({ startedAt }))
-    await update($, running, all => [...all, { id, label, detail }])
+    await update($, running, all => [...all, { id, ...call }])
     try {
       const result = await next(e)
       const text = 'deny' in result && result.deny !== undefined ? result.deny : result.text
       if (text !== undefined) await update($, memberOf(outputs, { requestId: id }), () => head(text, OUTPUT_LINES))
       return result
     } finally {
-      await update($, running, all => all.filter(r => r.id !== id))
+      // The call is the idle line before it leaves the spinner: each write
+      // redraws, so leaving first drew the call before it in between.
       const endedAt = await $.clock.now()
+      await update($, last, () => ({ ...call, endedAt, ms: endedAt - startedAt }))
       await update($, timing, () => ({ startedAt, ms: endedAt - startedAt }))
-      await update($, now, () => endedAt)
-      await update($, last, () => ({ label, detail, endedAt }))
+      await update($, running, all => all.filter(r => r.id !== id))
     }
   })
     // A failure here must never cost the call, nor leave it on the spinner.
@@ -213,7 +212,8 @@ export const register: Register = on => {
       message = all.length > 1 ? `${newest.label} (+${all.length - 1} more)` : newest.label
       detail = newest.detail
     } else if (finished !== null && e.props.message === null) {
-      message = `${age((await read($, now)) - finished.endedAt)} ago · ${finished.label}`
+      const ran = finished.ms === undefined ? '' : ` ${took(finished.ms)}`
+      message = `${age((await read($, now)) - finished.endedAt)} ago · ${finished.label}${ran}`
       detail = finished.detail
     } else {
       // A message the engine set (compacting, a retry) outranks the idle line.
