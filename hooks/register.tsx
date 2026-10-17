@@ -1,7 +1,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Diff, Finished, Head, Running, Timing, View } from '../types'
+import type { Diff, Finished, Head, Running, Tap, Timing, View } from '../types'
 
 // The tool calls in flight, oldest first. Parallel calls share the one spinner
 // line, so it names the newest's tool, counts the rest, and puts what the
@@ -16,6 +16,11 @@ const last = atom({ plugin: 'tool-status', key: 'last' } as const, null as Finis
 const now = atom({ plugin: 'tool-status', key: 'now' } as const, 0)
 // How much of each call tool rows draw; /tool-output sets it, $.store keeps it.
 const view = atom({ plugin: 'tool-status', key: 'view' } as const, 'full' as View)
+// A row's own view, by its tool_use_id, set by tapping its description. It holds
+// only while `chosen` is the count of /tool-output runs it was tapped under, so
+// running the command resets every row to the view it sets.
+const taps = atom({ plugin: 'tool-status', key: 'taps' } as const, null as Tap | null)
+const chosenCount = atom({ plugin: 'tool-status', key: 'chosen' } as const, 0)
 // The head of what each call returned, by its tool_use_id: the one text every
 // tool has (`tool.call`'s `text`), where the result's own shape varies by tool.
 const outputs = atom({ plugin: 'tool-status', key: 'outputs' } as const, null as Head | null)
@@ -132,8 +137,22 @@ async function choose($: EngineInterface, args: string): Promise<View | null> {
   const picked = chosen(args, await read($, view))
   if (picked === null) return null
   await update($, view, () => picked)
+  await update($, chosenCount, n => n + 1)
   await $.store.set('view', picked)
   return picked
+}
+
+// The view one row draws: its own if tapped since the last /tool-output, else the default.
+async function viewOf($: EngineInterface, id: string): Promise<View> {
+  const tap = await read($, memberOf(taps, { requestId: id }))
+  return tap !== null && tap.chosen === (await read($, chosenCount)) ? tap.view : read($, view)
+}
+
+// Steps the one row `id` to the view after the one it draws.
+async function step($: EngineInterface, id: string): Promise<void> {
+  const next = chosen('', await viewOf($, id)) ?? 'full'
+  const count = await read($, chosenCount)
+  await update($, memberOf(taps, { requestId: id }), () => ({ view: next, chosen: count }))
 }
 
 export const register: Register = on => {
@@ -235,7 +254,7 @@ export const register: Register = on => {
   // Keeps what a call was doing on its own transcript row, under its
   // header. Rows folded into a group's count line are not drawn one by one.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
-    const shown = await read($, view)
+    const shown = await viewOf($, e.props.tool_use_id)
     const lines = shown === 'none' ? 0 : shown === 'compact' ? INPUT_LINES : undefined
     const row = await next(lines === undefined ? e : { ...e, props: { ...e.props, input: capped(e.props.input, lines) } })
     const { Box, Button, Text } = $.ui.resolve(e)
@@ -249,7 +268,7 @@ export const register: Register = on => {
       : e.props.isRunning ? age((await read($, now)) - timing.startedAt) : undefined
     if (value === undefined && time === undefined) return row
     const diff = diffOf(e.props.output)
-    const press = () => choose($, '')
+    const press = () => step($, e.props.tool_use_id)
     // In the description's run, not a column of its own: a description that wraps
     // then resumes under the count instead of indented past it.
     const counts = diff && [
@@ -280,7 +299,7 @@ export const register: Register = on => {
 
   // Lines are cut at the edge, not wrapped, so the head stays that many rows.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
-    const current = await read($, view)
+    const current = await viewOf($, e.props.tool_use_id)
     if (current === 'full') return next(e)
     if (current !== 'compact') {
       const { Box } = $.ui.resolve(e)

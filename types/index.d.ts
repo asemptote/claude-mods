@@ -11,9 +11,11 @@ export type Diff = { added: number; removed: number }
 export type Timing = { startedAt: number; ms?: number }
 // How much of each call a tool row shows, least first.
 export type View = 'none' | 'compact' | 'inputs' | 'full'
+// A row's own view, and the count of /tool-output runs it was chosen under.
+export type Tap = { view: View; chosen: number }
 
 declare module 'claude-code' {
   interface PluginState {
-    'tool-status': { running: Running[]; last: Finished | null; now: number; view: View; outputs: StateFamily<Head | null>; timings: StateFamily<Timing | null> }
+    'tool-status': { running: Running[]; last: Finished | null; now: number; view: View; outputs: StateFamily<Head | null>; timings: StateFamily<Timing | null>; taps: StateFamily<Tap | null>; chosen: number }
   }
 }

@@ -158,17 +158,36 @@ test('every tool row carries what its call was doing under the header: a dim arr
     }
   }
   const ui = await $.ui.mount({ ...row('Bash', { command: 'ls', description: 'List files' }), surface: 'terminal' })
-  const output = async () => {
-    const drawn = await $.ui.mount({ ...result('toolu_old', 'Bash', { stdout: 'hello', stderr: '' }), surface: 'terminal' })
+  const output = async (id: string) => {
+    const drawn = await $.ui.mount({ ...result(id, 'Bash', { stdout: 'hello', stderr: '' }), surface: 'terminal' })
     const texts = (await drawn.findAll({ type: 'Text' })).map(t => t.text)
     await drawn.unmount()
     return texts
   }
   await ui.press({ plugin: 'tool-status', key: 'view' })
-  expect(await output()).toEqual([])
+  expect([await output('toolu_1'), await output('toolu_other')]).toEqual([[], ['full output']])
   await ui.press({ plugin: 'tool-status', key: 'view' })
-  expect(await output()).toEqual(['  ⎿ hello'])
+  expect([await output('toolu_1'), await output('toolu_other')]).toEqual([['  ⎿ hello'], ['full output']])
   await ui.unmount()
+})
+
+test('a tapped row keeps its own view until /tool-output sets every row\'s', async ($, on) => {
+  session(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const texts = async (id: string) => {
+    const drawn = await $.ui.mount({ ...result(id, 'Bash', { stdout: 'hello', stderr: '' }), surface: 'terminal' })
+    const shown = (await drawn.findAll({ type: 'Text' })).map(t => t.text)
+    await drawn.unmount()
+    return shown
+  }
+  const tapped = await $.ui.mount({ ...row('Bash', { command: 'ls', description: 'List files' }), surface: 'terminal' })
+  await $.command.run(typed('inputs'))
+  await tapped.press({ plugin: 'tool-status', key: 'view' })
+  expect(await tapped.findAll({ type: 'Text' }).then(t => t.map(x => x.text))).toEqual(['Bash(ls)', '  ↳ ', 'List files'])
+  expect([await texts('toolu_1'), await texts('toolu_other')]).toEqual([['full output'], []])
+  await $.command.run(typed('compact'))
+  expect([await texts('toolu_1'), await texts('toolu_other')]).toEqual([['  ⎿ hello'], ['  ⎿ hello']])
+  await tapped.unmount()
 })
 
 const result = (id: string, tool: string, output: unknown, isErrored = false) => ({
