@@ -164,11 +164,14 @@ test('requireBashDescription refuses a Bash call with no description before it r
   expect(await $.tool.call({ ...BASH, tool_use_id: 'n3' })).not.toHaveProperty('deny')
 })
 
-test('the turn closes with a summary line, and its footer says Worked', async ($, on) => {
+test('a turn summary is said as asked', () => {
   expect(turnSummary({ tools: 0, failed: 0, slowest: null })).toBeUndefined()
   expect(turnSummary({ tools: 14, failed: 1, slowest: { text: 'Run tests', ms: 38_000 } })).toBe('14 tools (1 failed) · slowest: Run tests 38s')
   expect(turnSummary({ tools: 3, failed: 0, slowest: { text: 'x', ms: 20 }, diff: { added: 120, removed: 30 } })).toBe('3 tools · +120/-30 lines')
+})
 
+// A turn that runs one 2-second Bash call, and what it logged.
+async function runTurn($: Engine, on: On) {
   const clock = mock.clock(on, { now: 0 })
   const tool = engine(on)
   const logged: string[] = []
@@ -189,12 +192,18 @@ test('the turn closes with a summary line, and its footer says Worked', async ($
   tool.release()
   await call
   await $.turn.complete({ answer: 'done', durationMs: 2_000, isAborted: false, turnId: 'turn', reason: 'answer' })
-  expect(logged).toEqual(['1 tool · slowest: Run tests 2.0s'])
-  // The turn's end clears the idle line.
-  expect(await textsOf($, spinner())).toEqual(['Thinking…'])
+  return logged
+}
 
+test('a turn ends with no summary line unless the option asks; the idle line clears and the footer says Worked', async ($, on) => {
+  expect(await runTurn($, on)).toEqual([])
+  expect(await textsOf($, spinner())).toEqual(['Thinking…'])
   const footer = { plugin: PLUGIN, surface: 'terminal', component: 'TurnDuration', props: { word: 'Baked', durationMs: 3000 } } as const
   expect(await textsOf($, footer)).toEqual(['Worked for 3s'])
+})
+
+test('turnSummary ends a turn that ran tools with a line summing them up', { options: { turnSummary: true } }, async ($, on) => {
+  expect(await runTurn($, on)).toEqual(['1 tool · slowest: Run tests 2.0s'])
 })
 
 test('compact cuts multi-line strings and runs of strings, leaving the rest', () => {

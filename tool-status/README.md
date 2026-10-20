@@ -44,17 +44,19 @@ sessions. Clicking a row's line steps that row alone: left click forward, right
 or ctrl+click back. The next `/tool-detail` resets every row. The ctrl+o
 transcript always draws rows in full.
 
-When a turn ends, a line sums it up: `14 tools (1 failed) · +120/-30 lines · slowest: Run tests 38s`.
+## Options
 
-## Option
-
-`requireBashDescription` (off by default) refuses any Bash call that has no
-`description` and asks the model to retry with one. Turn it on in `/config`, or
-in `~/.claude/settings.json`:
+Both are off by default. Turn them on in `/config`, or in
+`~/.claude/settings.json`:
 
 ```json
-"pluginConfigs": { "tool-status": { "options": { "requireBashDescription": true } } }
+"pluginConfigs": { "tool-status": { "options": { "turnSummary": true, "requireBashDescription": true } } }
 ```
+
+- `turnSummary` ends each turn that ran tools with a line summing them up:
+  `14 tools (1 failed) · +120/-30 lines · slowest: Run tests 38s`.
+- `requireBashDescription` refuses any Bash call that has no `description` and
+  asks the model to retry with one.
 
 ## Install
 

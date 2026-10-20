@@ -118,6 +118,7 @@ const merged = (runs: Run[]) =>
 
 export const register: Register = (on, options) => {
   const requireBashDescription = options.requireBashDescription === true
+  const showTurnSummary = options.turnSummary === true
 
   on('session.start', async ($, e, next) => {
     const stored = await $.store.get(STORE_KEY)
@@ -188,7 +189,7 @@ export const register: Register = (on, options) => {
         running: a.running.filter(c => c.id !== id),
         last: { label, detail: what, endedAt, ms, isErrored, isBackgrounded: backgrounded },
       }))
-      if (key === MAIN) turnStats = addCall(turnStats, { text, ms, isErrored, diff })
+      if (showTurnSummary && key === MAIN) turnStats = addCall(turnStats, { text, ms, isErrored, diff })
     }
   })
     // A fault here must never cost the call, nor leave it on the spinner.

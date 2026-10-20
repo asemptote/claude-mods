@@ -1,11 +1,19 @@
 {
   "name": "tool-status",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Names the running tool call on the spinner, with what it is doing under it and its time, and the time since the last call while none runs. Each tool row gets a line naming the call, with +added/-removed lines, its time and any failure; /tool-detail sets how much of every row shows (none, compact, input, full), and clicking a row's line steps that row alone (right or ctrl+click steps back).",
-  "author": { "name": "Asem Wardak" },
+  "author": {
+    "name": "Asem Wardak"
+  },
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
+    "turnSummary": {
+      "type": "boolean",
+      "title": "Turn summary",
+      "description": "End each turn that ran tools with a line summing them up: how many ran and failed, the lines changed, the slowest",
+      "default": false
+    },
     "requireBashDescription": {
       "type": "boolean",
       "title": "Require Bash descriptions",
