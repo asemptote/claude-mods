@@ -1,0 +1,6 @@
+{
+  "name": "spinner-tool-desc",
+  "version": "0.2.0",
+  "description": "Shows the running tool's description in the spinner, and the time since the last one while no tool runs. Each tool row in the transcript gets a summary line: click it to step that row through none, compact, input and full (right or ctrl+click steps back); /transcript-tool-detail sets every row.",
+  "types": "./types/index.d.ts"
+}
