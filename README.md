@@ -69,3 +69,7 @@ what it took from each.
 
 `git show legacy/tool-status:hooks/register.tsx` prints an old file;
 `git log --graph --all` shows where they meet.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

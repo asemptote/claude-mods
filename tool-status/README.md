@@ -77,9 +77,9 @@ claude plugin test tool-status
 ## History
 
 This mod merges three separate mods that grew on three machines: spinner-detail
-(machine A), tool-status 0.8.0 (machine B) and spinner-tool-desc (machine C). Each is kept verbatim on a `legacy/` branch and tag, and the merge
-commit that made 1.0.0 has all three as its parents. The repository's README
-lists them.
+(machine A), tool-status 0.8.0 (machine B) and spinner-tool-desc (machine C).
+Each is kept verbatim on a `legacy/` branch and tag, and the merge commit that
+made 1.0.0 has all three as its parents. The repository's README lists them.
 
 What 1.0.0 took from each:
 
