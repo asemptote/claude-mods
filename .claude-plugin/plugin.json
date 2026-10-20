@@ -1,0 +1,9 @@
+{
+  "name": "spinner-detail",
+  "version": "0.1.0",
+  "description": "Shows the running tool's description, or the background job's detail once written, in the spinner, and how long each call took and then how long until the next call or the end of the turn, refuses Bash calls without a description, and shows tool calls as only their descriptions; /tool-detail cycles that for every call, and clicking a call's description for that call alone, backwards under ctrl or a right click, through input only, the first 10 lines of their input and 5 of their output with diffs as +additions/-deletions, and in full",
+  "author": {
+    "name": "Asem Wardak"
+  },
+  "types": "./types/index.d.ts"
+}
