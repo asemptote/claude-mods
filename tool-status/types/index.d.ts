@@ -16,8 +16,8 @@ export type LoopActivity = { running: RunningCall[]; last: FinishedCall | null }
 
 /** A click's choice for one row, standing while `epoch` is unchanged. */
 export type RowView = { detail: Detail; epoch: number }
-/** What a row knows of its call that the row's props do not. */
-export type CallRecord = { startedAt: number; endedAt: number | null; isErrored: boolean; isBackgrounded: boolean }
+/** When a call ran, which the row's props do not say. */
+export type CallRecord = { startedAt: number; endedAt: number | null }
 
 declare module 'claude-code' {
   interface PluginState {

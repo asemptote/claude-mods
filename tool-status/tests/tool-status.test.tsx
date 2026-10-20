@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MountTarget } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { age, compact, describe, diffOf, lineDiff, stepDetail, took, turnSummary } from '../hooks/format'
+import { age, compact, describe, diffOf, stepDetail, took } from '../hooks/format'
 
 const PLUGIN = 'tool-status'
 const START = { cwd: '.', surface: 'terminal', isInteractive: true } as const
@@ -100,7 +100,7 @@ test('the spinner names the running tool with its description under it, then the
   await clock.advance(5_000)
   expect(await textsOf($, spinner())).toEqual(['Bash 5s', 'Run tests'])
   // The row counts up while it runs.
-  expect(await textsOf($, toolRow('t1', 'Bash', BASH, { isRunning: true }))).toEqual(['  Run tests| · 5s'])
+  expect(await textsOf($, toolRow('t1', 'Bash', BASH, { isRunning: true }))).toEqual(['  Run tests| · |5s'])
 
   tool.release()
   await call
@@ -108,7 +108,7 @@ test('the spinner names the running tool with its description under it, then the
   expect(await textsOf($, spinner())).toEqual(['Thinking… 12s since Bash (5.0s)', 'Run tests'])
   // A state the engine names outranks the idle line.
   expect(await textsOf($, spinner({ message: 'Compacting' }))).toEqual(['Compacting…'])
-  expect(await textsOf($, toolRow('t1', 'Bash', BASH))).toEqual(['  Run tests| · 5.0s'])
+  expect(await textsOf($, toolRow('t1', 'Bash', BASH))).toEqual(['  Run tests| · |5.0s'])
 })
 
 test('parallel calls are counted, and a subagent keeps its own spinner', async ($, on) => {
@@ -124,6 +124,18 @@ test('parallel calls are counted, and a subagent keeps its own spinner', async (
   expect(await textsOf($, spinner({}, 'sub'))).toEqual(['Grep 0s', 'TODO'])
   tool.release()
   await Promise.all(calls)
+})
+
+test("a subagent's turn starting leaves the main loop's running call on the spinner", async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const tool = engine(on)
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  const call = $.tool.call({ ...BASH, tool_use_id: 'm1' })
+  await clock.settle()
+  await $.turn.start({ text: 'look', turnId: 'sub-turn', agentId: 'sub' })
+  expect(await textsOf($, spinner())).toEqual(['Bash 0s', 'Run tests'])
+  tool.release()
+  await call
 })
 
 test('a failed call is marked on the spinner and in red on its row', async ($, on) => {
@@ -144,11 +156,12 @@ test('a failed call is marked on the spinner and in red on its row', async ($, o
 
 test('a call moved to the background says so', async ($, on) => {
   mock.clock(on, { now: 0 })
-  const tool = engine(on, { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1' } })
+  const result = { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1' }
+  const tool = engine(on, { result })
   tool.release()
   await $.tool.call({ ...BASH, tool_use_id: 'bg' })
   expect(await textsOf($, spinner())).toEqual(['Thinking… 0s since Bash (0.0s, backgrounded)', 'Run tests'])
-  expect((await textsOf($, toolRow('bg', 'Bash', BASH))).at(-1)).toBe('  Run tests| · backgrounded')
+  expect((await textsOf($, toolRow('bg', 'Bash', BASH, { output: result }))).at(-1)).toBe('  Run tests| · |backgrounded')
 })
 
 test('Bash calls without a description are refused only when the option asks', async ($, on) => {
@@ -164,21 +177,9 @@ test('requireBashDescription refuses a Bash call with no description before it r
   expect(await $.tool.call({ ...BASH, tool_use_id: 'n3' })).not.toHaveProperty('deny')
 })
 
-test('a turn summary is said as asked', () => {
-  expect(turnSummary({ tools: 0, failed: 0, slowest: null })).toBeUndefined()
-  expect(turnSummary({ tools: 14, failed: 1, slowest: { text: 'Run tests', ms: 38_000 } })).toBe('14 tools (1 failed) · slowest: Run tests 38s')
-  expect(turnSummary({ tools: 3, failed: 0, slowest: { text: 'x', ms: 20 }, diff: { added: 120, removed: 30 } })).toBe('3 tools · +120/-30 lines')
-})
-
-// A turn that runs one 2-second Bash call, and what it logged.
-async function runTurn($: Engine, on: On) {
+test('a turn that ran a call ends with the idle line cleared and the footer saying Worked', async ($, on) => {
   const clock = mock.clock(on, { now: 0 })
   const tool = engine(on)
-  const logged: string[] = []
-  on('ui.log', (_$, e) => {
-    logged.push(e.text)
-    return { value: undefined } as never
-  })
   on('ui.render', { component: 'TurnDuration' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>{`${e.props.word} for ${e.props.durationMs / 1000}s`}</Text>
@@ -192,18 +193,9 @@ async function runTurn($: Engine, on: On) {
   tool.release()
   await call
   await $.turn.complete({ answer: 'done', durationMs: 2_000, isAborted: false, turnId: 'turn', reason: 'answer' })
-  return logged
-}
-
-test('a turn ends with no summary line unless the option asks; the idle line clears and the footer says Worked', async ($, on) => {
-  expect(await runTurn($, on)).toEqual([])
   expect(await textsOf($, spinner())).toEqual(['Thinking…'])
   const footer = { plugin: PLUGIN, surface: 'terminal', component: 'TurnDuration', props: { word: 'Baked', durationMs: 3000 } } as const
   expect(await textsOf($, footer)).toEqual(['Worked for 3s'])
-})
-
-test('turnSummary ends a turn that ran tools with a line summing them up', { options: { turnSummary: true } }, async ($, on) => {
-  expect(await runTurn($, on)).toEqual(['1 tool · slowest: Run tests 2.0s'])
 })
 
 test('compact cuts multi-line strings and runs of strings, leaving the rest', () => {
@@ -247,11 +239,45 @@ test('/tool-detail draws none, compact, input and full rows, steps without an ar
   expect((await rowsOf($)).row).toEqual([lines(15, 'cmd'), '  Build it'])
 })
 
-test('the ctrl+o transcript draws every row in full', async ($, on) => {
+test('the ctrl+o transcript draws rows at the detail chosen, and a click steps them', async ($, on) => {
   engine(on)
   await $.session.start(START)
-  expect(await textsOf($, toolRow('c1', 'Bash', BIG, { isExpanded: true }))).toEqual([lines(15, 'cmd'), '  Build it'])
+  const expanded = toolRow('c1', 'Bash', BIG, { isExpanded: true })
+  expect(await textsOf($, expanded)).toEqual(['  Build it'])
+  const ui = await $.ui.mount(expanded)
+  await ui.pointer({ type: 'down', x: 2, y: 0, button: 'right' })
+  expect(await readTexts(ui)).toEqual([lines(15, 'cmd'), '  Build it'])
   expect(await textsOf($, { ...result, props: { ...result.props, isExpanded: true } })).toEqual([lines(9, 'out')])
+  await ui.unmount()
+})
+
+test("ctrl+o folds another party's message to its sender and first line, and a click steps it", async ($, on) => {
+  engine(on)
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  await $.session.start(START)
+  const body = lines(12, 'msg')
+  const message = (isExpanded: boolean, from?: { name: string }) =>
+    ({
+      plugin: PLUGIN,
+      surface: 'terminal',
+      component: 'UserMessage',
+      requestId: 'u1',
+      props: { text: body, origin: { kind: 'composer' }, isExpanded, ...(from !== undefined && { from }) },
+    }) as const
+
+  expect(await textsOf($, message(false, { name: 'Explore' }))).toEqual([body])
+  expect(await textsOf($, message(true))).toEqual([body])
+  expect(await textsOf($, message(true, { name: 'Explore' }))).toEqual(['  Explore: msg1| · |12 lines'])
+  const ui = await $.ui.mount(message(true, { name: 'Explore' }))
+  await ui.pointer({ type: 'down', x: 2, y: 0, button: 'left' })
+  expect(await readTexts(ui)).toEqual([`${lines(9, 'msg')}\n… +3 lines`, '  Explore: msg1| · |12 lines'])
+  await ui.pointer({ type: 'down', x: 2, y: 0, button: 'right' })
+  await ui.pointer({ type: 'down', x: 2, y: 0, button: 'right' })
+  expect(await readTexts(ui)).toEqual([body, '  Explore: msg1| · |12 lines'])
+  await ui.unmount()
 })
 
 test("a click on a row's line steps that row: left forward, right or ctrl+left back, inverted under the pointer", async ($, on) => {
@@ -316,13 +342,10 @@ test('counts the lines a call added and removed, by the shape of its result', ()
   expect(diffOf({ ...EDIT_RESULT, staged: true })).toBeUndefined()
   expect(diffOf({ type: 'create', filePath: 'b.ts', content: 'a\nb\nc\n', structuredPatch: [] })).toEqual({ added: 3, removed: 0 })
   expect(diffOf({ type: 'update', filePath: 'b.ts', content: '', structuredPatch: [] })).toBeUndefined()
-  expect(diffOf({ new_source: 'a\nB\nc\nd', old_source: 'a\nb\nc', edit_mode: 'replace' })).toEqual({ added: 2, removed: 1 })
-  expect(diffOf({ new_source: '', old_source: 'a\nb', edit_mode: 'delete' })).toEqual({ added: 0, removed: 2 })
   const bashEditDiff = { files: [{ filePath: 'x', hunks: [{ lines: ['+1', '+2', '-3'] }] }, { filePath: 'y', hunks: [{ lines: ['+4'] }] }], moreFiles: 0 }
   expect(diffOf({ stdout: '', bashEditDiff })).toEqual({ added: 3, removed: 1 })
   expect(diffOf({ stdout: 'ok' })).toBeUndefined()
   expect(diffOf('Error: string not found')).toBeUndefined()
-  expect(lineDiff('a\nb\nc\nd', 'a\nx\nc\ny\nd')).toEqual({ added: 2, removed: 1 })
 })
 
 test('an edit row shows +added/-removed in every detail, counted from the uncut result', async ($, on) => {

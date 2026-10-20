@@ -1,24 +1,22 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderPropsOf, Timer } from 'claude-code'
+import type { EngineInterface, Register, RenderInput, RenderPropsOf, Timer } from 'claude-code'
 
 import type { Detail, LoopActivity, Run } from '../types'
 import {
   DETAIL_OPTIONS,
   DETAILS,
   INPUT_LINES,
-  NO_STATS,
   OUTPUT_LINES,
-  addCall,
   age,
   compact,
   describe,
   diffOf,
+  firstLine,
+  lineCount,
   parseDetail,
   stepDetail,
   took,
-  turnSummary,
 } from './format'
-import type { Diff } from './format'
 
 const loops = atom({ plugin: 'tool-status', key: 'loops' } as const, {})
 const now = atom({ plugin: 'tool-status', key: 'now' } as const, 0)
@@ -101,24 +99,32 @@ const ensureTicker = ($: EngineInterface) => {
   ticker ??= $.clock.every(1000, () => void tick($))
 }
 
-// The main loop's calls this turn, for the line that closes it.
-let turnStats = NO_STATS
-
 const SEPARATOR: Run = { text: ' · ', color: null, dim: true }
 const dim = (text: string): Run => ({ text, color: null, dim: true })
 
-// Neighbouring runs of one style drawn as one Text.
-const merged = (runs: Run[]) =>
-  runs.reduce<Run[]>((out, run) => {
-    const last = out.at(-1)
-    if (last !== undefined && last.color === run.color && last.dim === run.dim) last.text += run.text
-    else out.push({ ...run })
-    return out
-  }, [])
+// A row's line, which a click steps. A `Client` tells the buttons apart;
+// mobile's table answers `Client` too, but the surface refuses it, so there
+// and elsewhere a Button steps forward.
+function lineOf($: EngineInterface, e: RenderInput, runs: Run[]) {
+  const elements = $.ui.resolve(e)
+  if ((e.surface === 'terminal' || e.surface === 'desktop') && 'Client' in elements) {
+    const { Client } = elements
+    return <Client key={LINE_KEY} module="./line.tsx" props={{ runs }} />
+  }
+  const { Button, Text } = elements
+  return (
+    <Button key={LINE_KEY} plain onPress={() => stepRow($, e.requestId, 1)}>
+      {runs.map((run, i) => (
+        <Text key={String(i)} color={run.color ?? undefined} dimColor={run.dim}>
+          {run.text}
+        </Text>
+      ))}
+    </Button>
+  )
+}
 
 export const register: Register = (on, options) => {
   const requireBashDescription = options.requireBashDescription === true
-  const showTurnSummary = options.turnSummary === true
 
   on('session.start', async ($, e, next) => {
     const stored = await $.store.get(STORE_KEY)
@@ -142,7 +148,7 @@ export const register: Register = (on, options) => {
   })
 
   // A line's click, from its `Client`: `{ step: 1 }` or `{ step: -1 }`.
-  on('ui.message', { component: 'ToolUse' }, async ($, e, next) => {
+  on('ui.message', async ($, e, next) => {
     if (e.element !== LINE_KEY) return next(e)
     const step = (e.data as { step?: unknown } | null)?.step
     if (step === 1 || step === -1) await stepRow($, e.requestId, step)
@@ -150,8 +156,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
-    turnStats = NO_STATS
-    await setLoop($, MAIN, () => undefined)
+    await setLoop($, e.agentId ?? MAIN, () => undefined)
     return next(e)
   })
 
@@ -163,33 +168,30 @@ export const register: Register = (on, options) => {
 
     const key = e.agentId ?? MAIN
     const id = e.tool_use_id
-    const { label, detail: what = null, text } = describe(e.tool, e)
+    const { label, detail: what = null } = describe(e.tool, e)
     const startedAt = await $.clock.now()
     await setLoop($, key, a => ({ ...a, running: [...a.running, { id, label, detail: what, startedAt }] }))
-    await update($, { ...CALLS, id }, () => ({ startedAt, endedAt: null, isErrored: false, isBackgrounded: false }))
+    await update($, { ...CALLS, id }, () => ({ startedAt, endedAt: null }))
     ensureTicker($)
 
     let isErrored = true
     let backgrounded = false
-    let diff: Diff | undefined
     try {
       const ran = await next(e)
       isErrored = ran.deny !== undefined || ran.isError === true
       backgrounded = isBackgrounded(ran.result)
-      if (!isErrored) diff = diffOf(ran.result)
       return ran
     } finally {
       const endedAt = await $.clock.now()
       const ms = endedAt - startedAt
       await update($, now, () => endedAt)
-      await update($, { ...CALLS, id }, () => ({ startedAt, endedAt, isErrored, isBackgrounded: backgrounded }))
+      await update($, { ...CALLS, id }, () => ({ startedAt, endedAt }))
       // One write makes the call the idle line as it leaves the running list,
       // so the spinner never names the call before it in between.
       await setLoop($, key, a => ({
         running: a.running.filter(c => c.id !== id),
         last: { label, detail: what, endedAt, ms, isErrored, isBackgrounded: backgrounded },
       }))
-      if (showTurnSummary && key === MAIN) turnStats = addCall(turnStats, { text, ms, isErrored, diff })
     }
   })
     // A fault here must never cost the call, nor leave it on the spinner.
@@ -200,11 +202,6 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     await setLoop($, e.agentId ?? MAIN, () => undefined)
-    if (e.agentId === undefined) {
-      const summary = turnSummary(turnStats)
-      turnStats = NO_STATS
-      if (summary !== undefined) $.ui.log(summary)
-    }
     return next(e)
   })
 
@@ -252,12 +249,11 @@ export const register: Register = (on, options) => {
   // Every tool row gets a line under it, in every detail and on every surface,
   // so a click can always step it: the call named as the spinner did, the
   // lines a file change added and removed, its time (counting while it runs),
-  // and a failure in red. In `none` that line is the row; ctrl+o shows it all.
+  // and a failure in red. In `none` that line is the row, ctrl+o included.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
-    const { tool, input, output, isRunning, isInterrupted } = e.props
-    const shown = e.props.isExpanded === true ? 'full' : await detailOf($, e.requestId)
+    const { tool, input, output, isRunning, isErrored, isInterrupted } = e.props
+    const shown = await detailOf($, e.requestId)
     const record = await read($, { ...CALLS, id: e.requestId })
-    const isErrored = e.props.isErrored || record?.isErrored === true
     const ms = record?.endedAt != null ? record.endedAt - record.startedAt : undefined
     // From the stored result, so rows of a resumed session count too.
     const diff = !isRunning && !isInterrupted && !isErrored ? diffOf(output) : undefined
@@ -276,28 +272,10 @@ export const register: Register = (on, options) => {
     } else if (isErrored) {
       parts.push([{ text: ms === undefined ? '✗ failed' : `✗ failed after ${took(ms)}`, color: 'error', dim: false }])
     } else if (ms !== undefined && ms >= 1000) parts.push([dim(took(ms))])
-    if (record?.isBackgrounded === true) parts.push([dim('backgrounded')])
-    const runs = merged(parts.flatMap((part, i) => (i === 0 ? part : [SEPARATOR, ...part])))
+    if (isBackgrounded(output)) parts.push([dim('backgrounded')])
+    const runs = parts.flatMap((part, i) => (i === 0 ? part : [SEPARATOR, ...part]))
 
-    const elements = $.ui.resolve(e)
-    const { Box, Button, Text } = elements
-    // A `Client` tells the buttons apart; mobile's table answers `Client` too,
-    // but the surface refuses it, so there and elsewhere a Button steps forward.
-    let line
-    if ((e.surface === 'terminal' || e.surface === 'desktop') && 'Client' in elements) {
-      const { Client } = elements
-      line = <Client key={LINE_KEY} module="./line.tsx" props={{ runs }} />
-    } else {
-      line = (
-        <Button key={LINE_KEY} plain onPress={() => stepRow($, e.requestId, 1)}>
-          {runs.map((run, i) => (
-            <Text key={String(i)} color={run.color ?? undefined} dimColor={run.dim}>
-              {run.text}
-            </Text>
-          ))}
-        </Button>
-      )
-    }
+    const line = lineOf($, e, runs)
     if (shown === 'none') return line
 
     const { output: _output, ...withoutOutput } = e.props
@@ -311,6 +289,30 @@ export const register: Register = (on, options) => {
         : shown === 'input'
           ? withoutOutput
           : e.props
+    const { Box } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        {await next({ ...e, props })}
+        {line}
+      </Box>
+    )
+  })
+
+  // A message another party sent (an agent, a teammate, a session, a channel)
+  // folds in ctrl+o as a tool row does, to a line naming the sender with the
+  // message's first line; `compact` cuts the body, `input` and `full` show it
+  // whole. The main view draws its own one line.
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    const { text, from, isExpanded } = e.props
+    if (!isExpanded || from === undefined) return next(e)
+    const shown = await detailOf($, e.requestId)
+    const count = lineCount(text)
+    const runs: Run[] = [{ text: `  ${from.name}: ${firstLine(text) ?? ''}`, color: 'claude', dim: false }]
+    if (count > 1) runs.push(SEPARATOR, dim(`${count} lines`))
+    const line = lineOf($, e, runs)
+    if (shown === 'none') return line
+    const props = shown === 'compact' ? { ...e.props, text: compact(text, INPUT_LINES) as string } : e.props
+    const { Box } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
         {await next({ ...e, props })}
@@ -321,7 +323,7 @@ export const register: Register = (on, options) => {
 
   // The result under a row: cut in `compact`, gone in `input` and `none`.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
-    const shown = e.props.isExpanded === true ? 'full' : await detailOf($, e.requestId)
+    const shown = await detailOf($, e.requestId)
     if (shown === 'full') return next(e)
     if (shown === 'compact') return next({ ...e, props: { ...e.props, output: compact(e.props.output, OUTPUT_LINES) } })
     const { Box } = $.ui.resolve(e)
