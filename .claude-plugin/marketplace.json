@@ -1,5 +1,12 @@
 {
-  "name": "tool-status",
+  "name": "claude-mods",
   "owner": { "name": "Asem Wardak" },
-  "plugins": [{ "name": "tool-status", "source": "./" }]
+  "description": "Asem Wardak's Claude Code mods",
+  "plugins": [
+    {
+      "name": "tool-status",
+      "source": "./tool-status",
+      "description": "Names the running tool call on the spinner and gives every tool row a line with its diff, time and failures; /tool-detail sets how much of each row shows."
+    }
+  ]
 }

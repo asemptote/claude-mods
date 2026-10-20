@@ -1,92 +1,65 @@
-# tool-status
+# claude-mods
 
-A Claude Code mod that says what the agent is doing while it works, and keeps
-the transcript's tool rows short until you ask for more.
+My Claude Code mods, one folder each. The repository is also a plugin
+marketplace, so any of them installs from a clone or from GitHub.
 
-**Spinner.** While a tool runs, the spinner names it and counts its time, with
-what the call is doing on the line under it:
-
-```
-✻ Bash 12s (+1 more)
-  Run the test suite
-```
-
-Between calls it says what the turn is doing in place of the random verb, and
-how long since the last call ended (`✗` if it failed):
-
-```
-✻ Thinking… 5s since Bash (12.4s)
-  Run the test suite
-```
-
-Subagents' spinners follow their own calls. A state the engine names
-(compacting, a retry) still shows as the engine draws it.
-
-**Tool rows.** Every tool row gets a line naming the call, with the lines it
-added and removed, its time (counting up while it runs), and any failure in red:
-
-```
-  Edit register.tsx · +12/-3
-  Run the test suite · ✗ failed after 4.2s
-```
-
-`/tool-detail [none|compact|input|full]` sets how much of every row shows:
-
-| detail | the row draws |
+| mod | what it does |
 | --- | --- |
-| `none` (the default) | the line alone |
-| `compact` | inputs cut to 10 lines, outputs to 5 |
-| `input` | inputs and the line, no outputs |
-| `full` | the engine's own row, and the line |
-
-Without an argument it steps to the next one. The choice is kept across
-sessions. Clicking a row's line steps that row alone: left click forward, right
-or ctrl+click back. The next `/tool-detail` resets every row. The ctrl+o
-transcript always draws rows in full.
-
-When a turn ends, a line sums it up: `14 tools (1 failed) · +120/-30 lines · slowest: Run tests 38s`.
-
-## Option
-
-`requireBashDescription` (off by default) refuses any Bash call that has no
-`description` and asks the model to retry with one. Turn it on in `/config`, or
-in `~/.claude/settings.json`:
-
-```json
-"pluginConfigs": { "tool-status": { "options": { "requireBashDescription": true } } }
-```
+| [tool-status](tool-status/) | Names the running tool call on the spinner, and gives every tool row a line with its diff, time and any failure; `/tool-detail` sets how much of each row shows. |
 
 ## Install
 
-From a clone of this repository, either name it in `~/.claude/settings.json` so
-every session loads it from the working copy:
-
-```json
-"env": { "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/tool-status" }
-```
-
-or install it from the clone, which is also a marketplace:
+Once per machine, add a clone as a marketplace:
 
 ```
-claude plugin install tool-status --marketplace /path/to/tool-status
+git clone <this repository> ~/claude-mods
+claude plugin marketplace add ~/claude-mods
 ```
 
-## Developing
+Then install each mod you want:
 
 ```
-claude plugin validate .
-claude plugin test .
+claude plugin install tool-status@claude-mods
 ```
 
-Once a session has loaded the mod from this folder, `tsc -p .` type-checks it
-against the engine's types, which the engine writes into
-`.claude-plugin/types/` (git ignores that folder).
+A mod installed from a folder marketplace runs from the clone itself: after a
+`git pull`, `/reload-plugins` picks the change up with no reinstall.
+
+From GitHub instead, at the prompt of a terminal session:
+
+```
+/plugin install tool-status --marketplace <owner>/claude-mods
+```
+
+## Layout
+
+```
+.claude-plugin/marketplace.json   lists every mod and its folder
+<mod>/.claude-plugin/plugin.json  the mod's manifest and version
+<mod>/hooks/                      hooks.json and the hooks module
+<mod>/types/index.d.ts            the mod's $.state contract
+<mod>/tests/                      claude plugin test <mod>
+<mod>/README.md                   what it does, its options, its history
+```
+
+A new mod gets a folder of its own and an entry in `marketplace.json`. Check
+it with:
+
+```
+claude plugin validate <mod>
+claude plugin test <mod>
+```
+
+The engine writes each mod's API types into `<mod>/.claude-plugin/types/`
+when a session loads it from its folder (git ignores them), and `tsc -p <mod>`
+then type-checks it.
 
 ## History
 
-This mod merges three separate mods that grew on three machines. Each is kept
-verbatim (less the engine-generated types) as a root commit on its own branch
-and tag. The first commit on `main` merges all three:
+Branches and tags under `legacy/` hold mods as they were before they came into
+this repository. Each one is a root commit, a verbatim snapshot with the mod's
+files at the top level. `tool-status` merged three of them; its README says
+what it took from each.
 
 | branch / tag | mod | where it ran |
 | --- | --- | --- |
@@ -95,29 +68,4 @@ and tag. The first commit on `main` merges all three:
 | `legacy/spinner-tool-desc`, `legacy/spinner-tool-desc-v0.2.0` | spinner-tool-desc 0.2.0 | machine C (Windows) |
 
 `git show legacy/tool-status:hooks/register.tsx` prints an old file;
-`git log --graph --all` shows how they meet.
-
-What 1.0.0 took from each:
-
-- **spinner-tool-desc:** the per-loop spinner (subagents apart), mode labels
-  in place of the random verb, failure marks, the four details with per-row
-  clicks through a `Client`, `compact` cutting values while keeping their
-  shape, notebook diffs, the turn summary, and `Worked` on the turn's last line.
-- **tool-status:** the two-line spinner (the tool on top, what it is doing
-  whole under it), the running row's live time, Bash `bashEditDiff` counts,
-  deferring to the engine's own spinner states, the cleanup of a call that
-  faults in the mod, and the theme's `success`/`error` colours.
-- **spinner-detail:** the `/tool-detail` name, stepping it without an
-  argument, the `backgrounded` mark, the Bash-description rule (now an option,
-  off by default), and diff counts read from any result's shape.
-
-Left behind:
-
-- spinner-detail's swap to the background job's `state.json` detail, which
-  polled a file every 500 ms forever. It also put a session-level summary where
-  the call's own description belongs.
-- spinner-detail's `then Xs` gap after each call.
-- hiding the run-in-background hint, so `ctrl+b` stays discoverable.
-- the old names and stored values (`/transcript-tool-detail`, `/tool-output`,
-  `preview`, `inputs`, `input-only`, `default`, `partial`), and the code that
-  migrated them.
+`git log --graph --all` shows where they meet.
