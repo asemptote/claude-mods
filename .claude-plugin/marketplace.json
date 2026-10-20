@@ -1,0 +1,5 @@
+{
+  "name": "tool-status",
+  "owner": { "name": "Asem Wardak" },
+  "plugins": [{ "name": "tool-status", "source": "./" }]
+}

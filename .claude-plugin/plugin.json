@@ -1,9 +1,15 @@
 {
-  "name": "spinner-detail",
-  "version": "0.1.0",
-  "description": "Shows the running tool's description, or the background job's detail once written, in the spinner, and how long each call took and then how long until the next call or the end of the turn, refuses Bash calls without a description, and shows tool calls as only their descriptions; /tool-detail cycles that for every call, and clicking a call's description for that call alone, backwards under ctrl or a right click, through input only, the first 10 lines of their input and 5 of their output with diffs as +additions/-deletions, and in full",
-  "author": {
-    "name": "Asem Wardak"
-  },
-  "types": "./types/index.d.ts"
+  "name": "tool-status",
+  "version": "1.0.0",
+  "description": "Names the running tool call on the spinner, with what it is doing under it and its time, and the time since the last call while none runs. Each tool row gets a line naming the call, with +added/-removed lines, its time and any failure; /tool-detail sets how much of every row shows (none, compact, input, full), and clicking a row's line steps that row alone (right or ctrl+click steps back).",
+  "author": { "name": "Asem Wardak" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "requireBashDescription": {
+      "type": "boolean",
+      "title": "Require Bash descriptions",
+      "description": "Refuse Bash calls that carry no description, asking the model to retry with one",
+      "default": false
+    }
+  }
 }
