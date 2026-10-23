@@ -1,7 +1,7 @@
 # claude-mods
 
 My Claude Code mods, one folder each. The repository is also a plugin
-marketplace, so any of them installs from a clone or from GitHub.
+marketplace, so any of them installs from GitHub or from a clone.
 
 | mod | what it does |
 | --- | --- |
@@ -9,11 +9,10 @@ marketplace, so any of them installs from a clone or from GitHub.
 
 ## Install
 
-Once per machine, add a clone as a marketplace:
+Once per machine, add the repository as a marketplace:
 
 ```
-git clone <this repository> ~/claude-mods
-claude plugin marketplace add ~/claude-mods
+claude plugin marketplace add asemptote/claude-mods
 ```
 
 Then install each mod you want:
@@ -22,14 +21,23 @@ Then install each mod you want:
 claude plugin install tool-status@claude-mods
 ```
 
-A mod installed from a folder marketplace runs from the clone itself: after a
-`git pull`, `/reload-plugins` picks the change up with no reinstall.
-
-From GitHub instead, at the prompt of a terminal session:
+To take a new version once it is pushed, then restart Claude Code:
 
 ```
-/plugin install tool-status --marketplace <owner>/claude-mods
+claude plugin marketplace update claude-mods
+claude plugin update tool-status@claude-mods
 ```
+
+On a machine where you work on the mods, add a clone as the marketplace
+instead (one or the other: both are named `claude-mods`):
+
+```
+git clone https://github.com/asemptote/claude-mods ~/claude-mods
+claude plugin marketplace add ~/claude-mods
+```
+
+A mod installed from a folder marketplace runs from the clone itself: after an
+edit or a `git pull`, `/reload-plugins` picks the change up with no reinstall.
 
 ## Layout
 

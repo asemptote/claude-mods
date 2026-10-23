@@ -59,16 +59,16 @@ its first line and length; `compact` cuts the body to 10 lines, `input` and
 
 `requireBashDescription`, off by default, refuses any Bash call that has no
 `description` and asks the model to retry with one. Turn it on in `/config`, or
-in `~/.claude/settings.json`:
+in `~/.claude/settings.json`, keyed by the installed id (`tool-status` alone is
+ignored):
 
 ```json
-"pluginConfigs": { "tool-status": { "options": { "requireBashDescription": true } } }
+"pluginConfigs": { "tool-status@claude-mods": { "options": { "requireBashDescription": true } } }
 ```
 
 ## Install
 
-From a clone of [claude-mods](../), once it is added as a marketplace (see its
-README):
+Once [claude-mods](../) is added as a marketplace (see its README):
 
 ```
 claude plugin install tool-status@claude-mods
