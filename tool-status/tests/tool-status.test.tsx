@@ -316,6 +316,10 @@ test("a click on a row's line steps that row: left forward, right or ctrl+left b
     expect(await inverted()).toBe(true)
     await ui.pointer({ type: 'leave', x: 2, y: 0 })
     expect(await inverted()).toBe(false)
+    // A pointer sweeping across in one frame: the leave comes before the
+    // enter's redraw, and must still clear it.
+    await Promise.all([ui.pointer({ type: 'enter', x: 2, y: 0 }), ui.pointer({ type: 'leave', x: 2, y: 0 })])
+    expect(await inverted()).toBe(false)
     await ui.unmount()
   }
 })
