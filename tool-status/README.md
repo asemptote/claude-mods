@@ -63,7 +63,7 @@ in `~/.claude/settings.json`, keyed by the installed id (`tool-status` alone is
 ignored):
 
 ```json
-"pluginConfigs": { "tool-status@claude-mods": { "options": { "requireBashDescription": true } } }
+"pluginConfigs": { "tool-status@asemptote": { "options": { "requireBashDescription": true } } }
 ```
 
 ## Install
@@ -71,7 +71,7 @@ ignored):
 Once [claude-mods](../) is added as a marketplace (see its README):
 
 ```
-claude plugin install tool-status@claude-mods
+claude plugin install tool-status@asemptote
 ```
 
 ## Developing
