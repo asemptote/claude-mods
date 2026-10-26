@@ -48,7 +48,7 @@ edit or a `git pull`, `/reload-plugins` picks the change up with no reinstall.
 <mod>/hooks/                      hooks.json and the hooks module
 <mod>/types/index.d.ts            the mod's $.state contract
 <mod>/tests/                      claude plugin test <mod>
-<mod>/README.md                   what it does, its options, its history
+<mod>/README.md                   what it does, its options
 ```
 
 A new mod gets a folder of its own and an entry in `marketplace.json`. Check
@@ -67,8 +67,8 @@ then type-checks it.
 
 Branches and tags under `legacy/` hold mods as they were before they came into
 this repository. Each one is a root commit, a verbatim snapshot with the mod's
-files at the top level. `tool-status` merged three of them; its README says
-what it took from each.
+files at the top level. `tool-status` merged three of them; commit `2086b9c`
+says what it took from each.
 
 | branch / tag | mod | where it ran |
 | --- | --- | --- |

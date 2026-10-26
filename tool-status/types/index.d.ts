@@ -16,8 +16,11 @@ export type LoopActivity = { running: RunningCall[]; last: FinishedCall | null }
 
 /** A click's choice for one row, standing while `epoch` is unchanged. */
 export type RowView = { detail: Detail; epoch: number }
-/** When a call ran, which the row's props do not say. */
-export type CallRecord = { startedAt: number; endedAt: number | null }
+/**
+ * When a call ran, and its place among the main loop's calls since the prompt
+ * (`n`, from 1; absent on a subagent's), which the row's props do not say.
+ */
+export type CallRecord = { startedAt: number; endedAt: number | null; n?: number }
 
 declare module 'claude-code' {
   interface PluginState {

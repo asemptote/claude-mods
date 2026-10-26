@@ -1,7 +1,7 @@
 {
   "name": "tool-status",
-  "version": "1.2.1",
-  "description": "Names the running tool call on the spinner, with what it is doing under it and its time, and the time since the last call while none runs. Each tool row gets a line naming the call, with +added/-removed lines, its time and any failure; /tool-detail sets how much of every row shows (none, compact, input, full), and clicking a row's line steps that row alone (right or ctrl+click steps back). Other parties' messages fold the same way in the ctrl+o transcript.",
+  "version": "1.3.0",
+  "description": "Names the running tool call on the spinner, with what it is doing under it and its time, and the time since the last call while none runs. Each tool row gets a line naming the call, with +added/-removed lines, its time and any failure, numbered from the prompt in the ctrl+o transcript; /tool-detail sets how much of every row shows (none, compact, input, full), and clicking a row's line steps that row alone (right or ctrl+click steps back). Other parties' messages fold the same way in the ctrl+o transcript.",
   "author": {
     "name": "Asem Wardak"
   },
@@ -13,6 +13,12 @@
       "title": "Require Bash descriptions",
       "description": "Refuse Bash calls that carry no description, asking the model to retry with one",
       "default": false
+    },
+    "numberRows": {
+      "type": "boolean",
+      "title": "Number tool rows",
+      "description": "Open each tool row's line in the ctrl+o transcript with its place among the calls since the prompt",
+      "default": true
     }
   }
 }

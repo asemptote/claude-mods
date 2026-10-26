@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MountTarget } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { age, compact, describe, diffOf, stepDetail, took } from '../hooks/format'
+import { age, compact, describe, diffOf, numberCalls, stepDetail, took } from '../hooks/format'
 
 const PLUGIN = 'tool-status'
 const START = { cwd: '.', surface: 'terminal', isInteractive: true } as const
@@ -365,4 +365,86 @@ test('an edit row shows +added/-removed in every detail, counted from the uncut 
   expect(await textsOf($, edit)).toEqual(['  Edit a.ts| · |+4|/|-2'])
   // A failed edit draws no counts.
   expect(await textsOf($, toolRow('e2', 'Edit', input, { isErrored: true, output: 'Error: string not found' }))).toEqual(['  Edit a.ts| · |✗ failed'])
+})
+
+const numberedRow = (id: string, n?: number) => (n === undefined ? ['  Run tests'] : [`  ${n}. |Run tests`])
+
+test("in ctrl+o a main-loop row opens with its place since the prompt, which an interruption doesn't start over", async ($, on) => {
+  mock.clock(on, { now: 0 })
+  engine(on).release()
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  const turn = async (text: string, ids: string[], isAborted = false) => {
+    await $.turn.start({ text, turnId: `turn ${text}` })
+    for (const id of ids) await $.tool.call({ ...BASH, tool_use_id: id })
+    await $.turn.complete({ answer: '', durationMs: 0, isAborted, turnId: `turn ${text}`, reason: isAborted ? 'aborted' : 'answer' })
+  }
+
+  await turn('go', ['a1', 'a2'])
+  await $.tool.call({ ...BASH, tool_use_id: 's1', agentId: 'sub' } as never)
+  await turn('next', ['b1'], true)
+  await turn('after the interruption', ['b2'])
+  // A turn started without a prompt goes on with the count.
+  await turn('', ['b3'])
+  await turn('again', ['c1'])
+
+  const expected = { a1: 1, a2: 2, s1: undefined, b1: 1, b2: 2, b3: 3, c1: 1 }
+  for (const [id, n] of Object.entries(expected)) {
+    expect(await textsOf($, toolRow(id, 'Bash', BASH, { isExpanded: true }))).toEqual(numberedRow(id, n))
+  }
+  // The main view's line draws no number.
+  expect(await textsOf($, toolRow('a2', 'Bash', BASH))).toEqual(['  Run tests'])
+})
+
+test('numberRows off draws ctrl+o rows with no number', { options: { numberRows: false } }, async ($, on) => {
+  mock.clock(on, { now: 0 })
+  engine(on).release()
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  await $.turn.start({ text: 'go', turnId: 'go' })
+  await $.tool.call({ ...BASH, tool_use_id: 'o1' })
+  expect(await textsOf($, toolRow('o1', 'Bash', BASH, { isExpanded: true }))).toEqual(numberedRow('o1'))
+})
+
+// A transcript as `$.session.messages()` reads it: two prompts, the second
+// interrupted and followed by another, then a row mid-turn after a result.
+const asked = (text: string) => ({ role: 'user', text, toolUses: [] }) as const
+const called = (...ids: string[]) => ({ role: 'assistant', text: '', toolUses: ids.map(tool_use_id => ({ tool_use_id, tool: 'Bash', input: {} })) }) as const
+const answered = (...ids: string[]) =>
+  ({ role: 'user', text: '', toolUses: [], toolResults: ids.map(tool_use_id => ({ tool_use_id, text: 'ok', isError: false })) }) as const
+const TRANSCRIPT = [
+  asked('go'),
+  called('r1', 'r2'),
+  answered('r1', 'r2'),
+  { role: 'assistant', text: 'done', toolUses: [] },
+  asked('next'),
+  called('r3'),
+  answered('r3'),
+  asked('[Request interrupted by user for tool use]'),
+  asked('go on'),
+  called('r4'),
+  answered('r4'),
+  asked('Base directory for this skill: …'),
+  called('r5'),
+  answered('r5'),
+] as const
+
+test('a transcript numbers its calls the same way, an interruption or a row mid-turn starting no count', () => {
+  const { numbers, count, isAnswered } = numberCalls(TRANSCRIPT)
+  expect(Object.fromEntries(numbers)).toEqual({ r1: 1, r2: 2, r3: 1, r4: 2, r5: 3 })
+  expect({ count, isAnswered }).toEqual({ count: 3, isAnswered: false })
+})
+
+test("a resumed session's rows are numbered from its transcript, and its count goes on", async ($, on) => {
+  mock.clock(on, { now: 0 })
+  engine(on).release()
+  on('session.messages', () => ({ value: TRANSCRIPT }) as never)
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  await $.session.start(START)
+
+  expect(await textsOf($, toolRow('r2', 'Bash', BASH, { isExpanded: true }))).toEqual(numberedRow('r2', 2))
+  expect(await textsOf($, toolRow('r4', 'Bash', BASH, { isExpanded: true }))).toEqual(numberedRow('r4', 2))
+  // The transcript ends mid-turn, so the next prompt goes on with its count.
+  await $.turn.start({ text: 'more', turnId: 'more' })
+  await $.tool.call({ ...BASH, tool_use_id: 'r6' })
+  expect(await textsOf($, toolRow('r6', 'Bash', BASH, { isExpanded: true }))).toEqual(numberedRow('r6', 4))
 })

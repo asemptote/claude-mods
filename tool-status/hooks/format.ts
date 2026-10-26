@@ -93,6 +93,42 @@ export function diffOf(output: unknown): Diff | undefined {
   return undefined
 }
 
+/** A transcript row as `$.session.messages()` gives it, as much as numbering reads. */
+export type Row = {
+  role: 'user' | 'assistant'
+  text: string
+  toolUses: ReadonlyArray<{ tool_use_id: string }>
+  toolResults?: readonly unknown[]
+}
+
+/** The transcript's calls numbered, and where the count stands at its end. */
+export type Numbered = {
+  numbers: Map<string, number>
+  count: number
+  /** Whether the last turn was answered, so the next prompt counts from 1. */
+  isAnswered: boolean
+}
+
+const INTERRUPTED = '[Request interrupted by user'
+
+// Each call's place among the calls since its prompt, from 1, read from the
+// transcript for the calls this process did not see run. A prompt starts a
+// count only after an answer (or opening the transcript): one after a tool
+// result or an interruption goes on with the count, as it does live.
+export function numberCalls(rows: readonly Row[]): Numbered {
+  const numbers = new Map<string, number>()
+  let count = 0
+  let isAnswered = true
+  for (const row of rows) {
+    if (row.role === 'assistant') {
+      for (const use of row.toolUses) numbers.set(use.tool_use_id, ++count)
+      isAnswered = row.toolUses.length === 0
+    } else if ((row.toolResults?.length ?? 0) > 0 || row.text.startsWith(INTERRUPTED)) isAnswered = false
+    else if (isAnswered && row.text.trim() !== '') count = 0
+  }
+  return { numbers, count, isAnswered }
+}
+
 // Each multi-line string, and each run of strings (a hunk's lines, a list of
 // files), cut to `max` lines, the last saying how many are left out. The cut
 // keeps the value's shape, so the tool's own renderer still draws it.

@@ -13,6 +13,7 @@ import {
   diffOf,
   firstLine,
   lineCount,
+  numberCalls,
   parseDetail,
   stepDetail,
   took,
@@ -99,6 +100,46 @@ const ensureTicker = ($: EngineInterface) => {
   ticker ??= $.clock.every(1000, () => void tick($))
 }
 
+// The main loop's calls since the prompt, each numbered as it starts. A
+// prompt counts from 1 only after an answered turn: one after an interruption
+// goes on with the count, as does one sent mid-turn, which starts no turn.
+let callCount = 0
+let isAnswered = true
+
+// Numbers for the calls this process did not see run (a resumed session's),
+// read from the transcript again only for a row it has not been asked about:
+// one chain, so the rows drawn together share one read.
+let fromTranscript: Promise<Map<string, number>> = Promise.resolve(new Map())
+const asked = new Set<string>()
+
+function transcriptNumber($: EngineInterface, id: string): Promise<number | undefined> {
+  if (!asked.has(id)) {
+    asked.add(id)
+    fromTranscript = fromTranscript.then(async known => {
+      if (known.has(id)) return known
+      try {
+        return numberCalls(await $.session.messages()).numbers
+      } catch {
+        return known
+      }
+    })
+  }
+  return fromTranscript.then(known => known.get(id))
+}
+
+// Where the count stands at the transcript's end, so a reload or a resume
+// goes on with it; unread, it starts over.
+async function resumeCount($: EngineInterface) {
+  try {
+    const numbered = numberCalls(await $.session.messages())
+    callCount = numbered.count
+    isAnswered = numbered.isAnswered
+    fromTranscript = Promise.resolve(numbered.numbers)
+  } catch {
+    // The transcript unread, the next prompt counts from 1.
+  }
+}
+
 const SEPARATOR: Run = { text: ' · ', color: null, dim: true }
 const dim = (text: string): Run => ({ text, color: null, dim: true })
 
@@ -125,11 +166,13 @@ function lineOf($: EngineInterface, e: RenderInput, runs: Run[]) {
 
 export const register: Register = (on, options) => {
   const requireBashDescription = options.requireBashDescription === true
+  const numberRows = options.numberRows === true
 
   on('session.start', async ($, e, next) => {
     const stored = await $.store.get(STORE_KEY)
     const chosen = (typeof stored === 'string' && parseDetail(stored)) || INITIAL_DETAIL
     await update($, detail, () => chosen)
+    if (numberRows) await resumeCount($)
     await $.command.register({
       name: 'tool-detail',
       description: 'How much of each tool call the transcript shows: none, compact, input or full; the next one without an argument',
@@ -156,11 +199,15 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined && e.text !== '' && isAnswered) callCount = 0
     await setLoop($, e.agentId ?? MAIN, () => undefined)
     return next(e)
   })
 
   on('tool.call', async ($, e, next) => {
+    // Numbered first, so parallel calls take theirs in the order they were
+    // made, and a refused call, whose row is drawn too, takes one.
+    const n = e.agentId === undefined ? ++callCount : undefined
     const own = (e as { description?: unknown }).description
     if (requireBashDescription && e.tool === 'Bash' && (typeof own !== 'string' || own.trim() === '')) {
       return { deny: MISSING_DESCRIPTION }
@@ -171,7 +218,8 @@ export const register: Register = (on, options) => {
     const { label, detail: what = null } = describe(e.tool, e)
     const startedAt = await $.clock.now()
     await setLoop($, key, a => ({ ...a, running: [...a.running, { id, label, detail: what, startedAt }] }))
-    await update($, { ...CALLS, id }, () => ({ startedAt, endedAt: null }))
+    const numbered = n === undefined ? {} : { n }
+    await update($, { ...CALLS, id }, () => ({ startedAt, endedAt: null, ...numbered }))
     ensureTicker($)
 
     let isErrored = true
@@ -185,7 +233,7 @@ export const register: Register = (on, options) => {
       const endedAt = await $.clock.now()
       const ms = endedAt - startedAt
       await update($, now, () => endedAt)
-      await update($, { ...CALLS, id }, () => ({ startedAt, endedAt }))
+      await update($, { ...CALLS, id }, () => ({ startedAt, endedAt, ...numbered }))
       // One write makes the call the idle line as it leaves the running list,
       // so the spinner never names the call before it in between.
       await setLoop($, key, a => ({
@@ -201,6 +249,7 @@ export const register: Register = (on, options) => {
     })
 
   on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) isAnswered = !e.isAborted
     await setLoop($, e.agentId ?? MAIN, () => undefined)
     return next(e)
   })
@@ -249,7 +298,8 @@ export const register: Register = (on, options) => {
   // Every tool row gets a line under it, in every detail and on every surface,
   // so a click can always step it: the call named as the spinner did, the
   // lines a file change added and removed, its time (counting while it runs),
-  // and a failure in red. In `none` that line is the row, ctrl+o included.
+  // and a failure in red. In `none` that line is the row, ctrl+o included,
+  // where it opens with the call's place since the prompt.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const { tool, input, output, isRunning, isErrored, isInterrupted } = e.props
     const shown = await detailOf($, e.requestId)
@@ -257,8 +307,14 @@ export const register: Register = (on, options) => {
     const ms = record?.endedAt != null ? record.endedAt - record.startedAt : undefined
     // From the stored result, so rows of a resumed session count too.
     const diff = !isRunning && !isInterrupted && !isErrored ? diffOf(output) : undefined
+    const n = numberRows && e.props.isExpanded === true ? (record?.n ?? (await transcriptNumber($, e.requestId))) : undefined
 
-    const parts: Run[][] = [[{ text: `  ${describe(tool, input).text}`, color: 'claude', dim: false }]]
+    const name = describe(tool, input).text
+    const parts: Run[][] = [
+      n === undefined
+        ? [{ text: `  ${name}`, color: 'claude', dim: false }]
+        : [dim(`  ${n}. `), { text: name, color: 'claude', dim: false }],
+    ]
     if (diff !== undefined) {
       parts.push([
         { text: `+${diff.added}`, color: 'success', dim: false },
