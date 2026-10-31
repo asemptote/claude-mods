@@ -93,6 +93,65 @@ export function diffOf(output: unknown): Diff | undefined {
   return undefined
 }
 
+/** How long a call's main text was, in characters: what it was given, what it gave back. */
+export type Size = { input: number | undefined; output: number | undefined }
+
+const charsOf = (value: unknown) => (typeof value === 'string' ? value.length : undefined)
+
+// The characters of text blocks (`[{ type: 'text', text }]`), as an agent or
+// an MCP tool answers.
+const blockChars = (value: unknown) => {
+  if (!Array.isArray(value)) return undefined
+  const texts = value.flatMap(block => (isRecord(block) && typeof block.text === 'string' ? [block.text] : []))
+  return texts.length > 0 ? texts.reduce((n, text) => n + text.length, 0) : undefined
+}
+
+// A call's size, read from the shape of its input and stored result whatever
+// the tool: a command or a prompt in; out, a shell's stdout and stderr, a
+// read's content, a search's matches or file list, an agent's or MCP tool's
+// text, a fetch's result. A file change has its +/- instead.
+export function sizeOf(input: unknown, output: unknown): Size {
+  const args = isRecord(input) ? input : {}
+  const command = charsOf(args.command)
+  const size: Size = { input: command !== undefined && command > 0 ? command : charsOf(args.prompt), output: undefined }
+  if (typeof output === 'string') size.output = output.length
+  else if (Array.isArray(output)) size.output = blockChars(output)
+  else if (isRecord(output) && diffOf(output) === undefined) {
+    const file = output.file
+    if (typeof output.stdout === 'string') size.output = output.stdout.length + (charsOf(output.stderr) ?? 0)
+    else if (isRecord(file) && typeof file.content === 'string') size.output = file.content.length
+    else if (typeof output.content === 'string' && Array.isArray(output.filenames)) size.output = output.content.length
+    else if (Array.isArray(output.filenames)) size.output = output.filenames.join('\n').length
+    else if (typeof output.result === 'string') size.output = output.result.length
+    else size.output = blockChars(output.content)
+  }
+  return size
+}
+
+// `n` in `unit`s of `size`: one decimal under ten (none when it is .0), else
+// whole. Tenths are counted from `n` itself, so 150 is 1.5 tenths' worth
+// exactly and rounds up.
+const scaled = (n: number, size: number, unit: string) => {
+  const tenths = Math.round((n * 10) / size)
+  return `${tenths < 100 ? tenths / 10 : Math.round(n / size)}${unit}`
+}
+
+/** A count cut short: exact under a hundred, then `0.1k`, `1.2k`, `31k`, `1.2M`. */
+export const abbreviated = (n: number): string =>
+  n < 100 ? String(n) : n < 999_500 ? scaled(n, 1e3, 'k') : scaled(n, 1e6, 'M')
+
+const chars = (n: number) => `${abbreviated(n)} ${n === 1 ? 'char' : 'chars'}`
+
+/**
+ * A size as the row's line says it, in characters, input then output:
+ * `42 → 1.2k chars`, the input alone with nothing out (`42 chars`), the
+ * output alone with no input (`→ 85 chars`).
+ */
+export function sizeText({ input, output }: Size): string | undefined {
+  if (input === undefined || input === 0) return output === undefined ? undefined : `→ ${chars(output)}`
+  return output === undefined ? chars(input) : `${abbreviated(input)} → ${chars(output)}`
+}
+
 /** A transcript row as `$.session.messages()` gives it, as much as numbering reads. */
 export type Row = {
   role: 'user' | 'assistant'

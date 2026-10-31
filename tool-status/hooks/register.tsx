@@ -15,9 +15,13 @@ import {
   lineCount,
   numberCalls,
   parseDetail,
+  sizeOf,
+  sizeText,
   stepDetail,
   took,
 } from './format'
+import { cutSegments, splitCommand } from './highlight'
+import type { Shell } from './highlight'
 
 const loops = atom({ plugin: 'tool-status', key: 'loops' } as const, {})
 const now = atom({ plugin: 'tool-status', key: 'now' } as const, 0)
@@ -140,8 +144,26 @@ async function resumeCount($: EngineInterface) {
   }
 }
 
-const SEPARATOR: Run = { text: ' · ', color: null, dim: true }
+// The tools whose rows draw their command highlighted, by the shell it is in.
+const SHELLS: Record<string, Shell | undefined> = { Bash: 'bash', PowerShell: 'powershell' }
+
+const SEPARATOR: Run ={ text: ' · ', color: null, dim: true }
 const dim = (text: string): Run => ({ text, color: null, dim: true })
+
+// The rule closing an expanded row, under its output (or its input, where no
+// output shows): a dim line across the surface from the row's indent. Rows
+// are told apart by it, not by a blank line.
+function ruleOf($: EngineInterface, e: RenderInput) {
+  const { Box, Text } = $.ui.resolve(e)
+  const width = Math.max(10, (e.viewport?.columns ?? 80) - 4)
+  return (
+    <Box key="tool-rule" paddingLeft={2}>
+      <Text dimColor wrap="truncate-end">
+        {'─'.repeat(width)}
+      </Text>
+    </Box>
+  )
+}
 
 // A row's line, which a click steps. A `Client` tells the buttons apart;
 // mobile's table answers `Client` too, but the surface refuses it, so there
@@ -167,6 +189,7 @@ function lineOf($: EngineInterface, e: RenderInput, runs: Run[]) {
 export const register: Register = (on, options) => {
   const requireBashDescription = options.requireBashDescription === true
   const numberRows = options.numberRows === true
+  const highlightCommands = options.highlightCommands === true
 
   on('session.start', async ($, e, next) => {
     const stored = await $.store.get(STORE_KEY)
@@ -295,7 +318,7 @@ export const register: Register = (on, options) => {
     return under(`${lead}${ellipsis} ${since} since ${last.isErrored ? '✗ ' : ''}${last.label} (${how})`, last.detail)
   })
 
-  // Every tool row gets a line under it, in every detail and on every surface,
+  // Every tool row gets a line heading it, in every detail and on every surface,
   // so a click can always step it: the call named as the spinner did, the
   // lines a file change added and removed, its time (counting while it runs),
   // and a failure in red. In `none` that line is the row, ctrl+o included,
@@ -322,6 +345,11 @@ export const register: Register = (on, options) => {
         { text: `-${diff.removed}`, color: 'error', dim: false },
       ])
     }
+    // How long its input was, and its output once it has one: a running call
+    // or one moved to the background has none yet.
+    const hasOutput = !isRunning && !isBackgrounded(output)
+    const size = !isInterrupted && !isErrored ? sizeText(sizeOf(input, hasOutput ? output : undefined)) : undefined
+    if (size !== undefined) parts.push([dim(size)])
     if (isRunning) parts.push([dim(record ? age((await read($, now)) - record.startedAt) : 'running')])
     else if (isInterrupted) {
       if (shown === 'none') parts.push([dim('interrupted')])
@@ -332,7 +360,41 @@ export const register: Register = (on, options) => {
     const runs = parts.flatMap((part, i) => (i === 0 ? part : [SEPARATOR, ...part]))
 
     const line = lineOf($, e, runs)
+    // In `none` the rows stack, a line each. Past it, a row is closed by a
+    // rule: under its input here in `input`, under its output (`ToolResult`)
+    // in `compact` and `full`.
     if (shown === 'none') return line
+    const { Box } = $.ui.resolve(e)
+    const rule = shown === 'input' ? ruleOf($, e) : null
+
+    // A Bash or PowerShell command drawn by the mod, highlighted: the shell,
+    // and each heredoc body, here-string or multi-line `-c` in its own
+    // language. `full` keeps the engine's row.
+    const command = (input as { command?: unknown } | null)?.command
+    const shell = SHELLS[tool]
+    if (highlightCommands && shell !== undefined && shown !== 'full' && typeof command === 'string') {
+      const all = splitCommand(command, shell)
+      const { segments, hidden } = shown === 'compact' ? cutSegments(all, INPUT_LINES) : { segments: all, hidden: 0 }
+      const { Code, Text } = $.ui.resolve(e)
+      // The line heads the row, the code under it behind a dim bar.
+      return (
+        <Box flexDirection="column">
+          {line}
+          <Box flexDirection="column" marginLeft={2} paddingLeft={1} borderStyle="quote" borderDimColor>
+            {segments.map((s, i) => (
+              <Code
+                key={`code-${i}`}
+                source={s.text}
+                {...(s.language !== undefined && { language: s.language })}
+                {...(s.path !== undefined && { path: s.path })}
+              />
+            ))}
+            {hidden > 0 && <Text dimColor>{`… +${hidden} lines`}</Text>}
+          </Box>
+          {rule}
+        </Box>
+      )
+    }
 
     const { output: _output, ...withoutOutput } = e.props
     const props =
@@ -345,10 +407,18 @@ export const register: Register = (on, options) => {
         : shown === 'input'
           ? withoutOutput
           : e.props
-    const { Box } = $.ui.resolve(e)
+    // The line heads the row: under the engine's, it would stand between the
+    // input and the output (`ToolResult`, drawn after the whole row). The
+    // engine's row opens with its top margin, a blank line, so it is pulled up
+    // a line to sit right under the line, over the line's own row. Laid out
+    // bottom up, the line comes last, so it is drawn over that margin and a
+    // click on it reaches it rather than the engine's row.
     return (
-      <Box flexDirection="column">
-        {await next({ ...e, props })}
+      <Box flexDirection="column-reverse">
+        {rule}
+        <Box flexDirection="column" marginTop={-1}>
+          {await next({ ...e, props })}
+        </Box>
         {line}
       </Box>
     )
@@ -377,13 +447,19 @@ export const register: Register = (on, options) => {
     )
   })
 
-  // The result under a row: cut in `compact`, gone in `input` and `none`.
+  // The result under a row: cut in `compact`, gone in `input` and `none`;
+  // where it shows, the rule closing the row follows it.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     const shown = await detailOf($, e.requestId)
-    if (shown === 'full') return next(e)
-    if (shown === 'compact') return next({ ...e, props: { ...e.props, output: compact(e.props.output, OUTPUT_LINES) } })
     const { Box } = $.ui.resolve(e)
-    return <Box />
+    if (shown === 'none' || shown === 'input') return <Box />
+    const props = shown === 'compact' ? { ...e.props, output: compact(e.props.output, OUTPUT_LINES) } : e.props
+    return (
+      <Box flexDirection="column">
+        {await next({ ...e, props })}
+        {ruleOf($, e)}
+      </Box>
+    )
   })
 
   // The line closing a turn (`Baked for 3s`) samples a random verb too.

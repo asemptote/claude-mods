@@ -6,7 +6,7 @@ clone.
 
 | mod | what it does |
 | --- | --- |
-| [tool-status](tool-status/) | Names the running tool call on the spinner, and gives every tool row a line with its diff, time and any failure; `/tool-detail` sets how much of each row shows. |
+| [tool-status](tool-status/) | Names the running tool call on the spinner, and gives every tool row a line with its diff, input and output size, time and any failure; `/tool-detail` sets how much of each row shows, with shell commands highlighted, embedded code in its own language. |
 
 ## Install
 

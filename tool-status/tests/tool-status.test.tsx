@@ -2,7 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MountTarget } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { age, compact, describe, diffOf, numberCalls, stepDetail, took } from '../hooks/format'
+import { abbreviated, age, compact, describe, diffOf, numberCalls, sizeOf, sizeText, stepDetail, took } from '../hooks/format'
+import { cutSegments, splitCommand } from '../hooks/highlight'
 
 const PLUGIN = 'tool-status'
 const START = { cwd: '.', surface: 'terminal', isInteractive: true } as const
@@ -58,10 +59,13 @@ function engine(on: On, { fails = false, result = { stdout: 'ok' } as unknown, s
 
 type Mounted = Pick<Awaited<ReturnType<Engine['ui']['mount']>>, 'findAll'>
 
-// What a drawing reads: its Texts, then a line's `Client` as its runs joined
-// by `|` (the first Text found in it is the outer one holding them all).
+// What a drawing reads: its Code blocks' sources, its Texts, then a line's
+// `Client` as its runs joined by `|` (the first Text found in it is the outer
+// one holding them all).
 async function readTexts(ui: Mounted) {
-  const texts = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+  const codes = (await ui.findAll({ type: 'Code' })).map(found => found.text)
+  // The rule closing an expanded row reads as `rule`.
+  const texts = [...codes, ...(await ui.findAll({ type: 'Text' })).map(found => (/^─+$/.test(found.text) ? 'rule' : found.text))]
   for (const client of await ui.findAll({ type: 'Client' })) {
     const runs = (await ui.findAll({ type: 'Text', in: client.key })).slice(1)
     texts.push(runs.map(found => found.text).join('|'))
@@ -100,7 +104,7 @@ test('the spinner names the running tool with its description under it, then the
   await clock.advance(5_000)
   expect(await textsOf($, spinner())).toEqual(['Bash 5s', 'Run tests'])
   // The row counts up while it runs.
-  expect(await textsOf($, toolRow('t1', 'Bash', BASH, { isRunning: true }))).toEqual(['  Run tests| · |5s'])
+  expect(await textsOf($, toolRow('t1', 'Bash', BASH, { isRunning: true }))).toEqual(['  Run tests| · |8 chars| · |5s'])
 
   tool.release()
   await call
@@ -108,7 +112,7 @@ test('the spinner names the running tool with its description under it, then the
   expect(await textsOf($, spinner())).toEqual(['Thinking… 12s since Bash (5.0s)', 'Run tests'])
   // A state the engine names outranks the idle line.
   expect(await textsOf($, spinner({ message: 'Compacting' }))).toEqual(['Compacting…'])
-  expect(await textsOf($, toolRow('t1', 'Bash', BASH))).toEqual(['  Run tests| · |5.0s'])
+  expect(await textsOf($, toolRow('t1', 'Bash', BASH))).toEqual(['  Run tests| · |8 chars| · |5.0s'])
 })
 
 test('parallel calls are counted, and a subagent keeps its own spinner', async ($, on) => {
@@ -161,7 +165,7 @@ test('a call moved to the background says so', async ($, on) => {
   tool.release()
   await $.tool.call({ ...BASH, tool_use_id: 'bg' })
   expect(await textsOf($, spinner())).toEqual(['Thinking… 0s since Bash (0.0s, backgrounded)', 'Run tests'])
-  expect((await textsOf($, toolRow('bg', 'Bash', BASH, { output: result }))).at(-1)).toBe('  Run tests| · |backgrounded')
+  expect((await textsOf($, toolRow('bg', 'Bash', BASH, { output: result }))).at(-1)).toBe('  Run tests| · |8 chars| · |backgrounded')
 })
 
 test('Bash calls without a description are refused only when the option asks', async ($, on) => {
@@ -224,30 +228,30 @@ test('/tool-detail draws none, compact, input and full rows, steps without an ar
   await $.session.start(START)
 
   // A session with nothing stored starts at the line alone.
-  expect(await rowsOf($)).toEqual({ row: ['  Build it'], result: [] })
+  expect(await rowsOf($)).toEqual({ row: ['  Build it| · |80 chars'], result: [] })
   expect((await toolDetail($, '')).text).toBe('Tool detail: compact (inputs cut to 10 lines, outputs to 5).')
-  expect(await rowsOf($)).toEqual({ row: [`${lines(9, 'cmd')}\n… +6 lines`, '  Build it'], result: [`${lines(4, 'out')}\n… +5 lines`] })
+  expect(await rowsOf($)).toEqual({ row: [lines(9, 'cmd'), '… +6 lines', '  Build it| · |80 chars'], result: [`${lines(4, 'out')}\n… +5 lines`, 'rule'] })
   expect((await toolDetail($, '')).text).toContain('Tool detail: input')
-  expect(await rowsOf($)).toEqual({ row: [lines(15, 'cmd'), '  Build it'], result: [] })
+  expect(await rowsOf($)).toEqual({ row: [lines(15, 'cmd'), 'rule', '  Build it| · |80 chars'], result: [] })
   expect((await toolDetail($, 'FULL')).text).toContain('Tool detail: full')
-  expect(await rowsOf($)).toEqual({ row: [lines(15, 'cmd'), '  Build it'], result: [lines(9, 'out')] })
+  expect(await rowsOf($)).toEqual({ row: [lines(15, 'cmd'), '  Build it| · |80 chars'], result: [lines(9, 'out'), 'rule'] })
   expect((await toolDetail($, '')).text).toContain('Tool detail: none')
   expect((await toolDetail($, 'maybe')).text).toBe('Usage: /tool-detail [none|compact|input|full]')
 
   await toolDetail($, 'input')
   await $.session.start(START)
-  expect((await rowsOf($)).row).toEqual([lines(15, 'cmd'), '  Build it'])
+  expect((await rowsOf($)).row).toEqual([lines(15, 'cmd'), 'rule', '  Build it| · |80 chars'])
 })
 
 test('the ctrl+o transcript draws rows at the detail chosen, and a click steps them', async ($, on) => {
   engine(on)
   await $.session.start(START)
   const expanded = toolRow('c1', 'Bash', BIG, { isExpanded: true })
-  expect(await textsOf($, expanded)).toEqual(['  Build it'])
+  expect(await textsOf($, expanded)).toEqual(['  Build it| · |80 chars'])
   const ui = await $.ui.mount(expanded)
   await ui.pointer({ type: 'down', x: 2, y: 0, button: 'right' })
-  expect(await readTexts(ui)).toEqual([lines(15, 'cmd'), '  Build it'])
-  expect(await textsOf($, { ...result, props: { ...result.props, isExpanded: true } })).toEqual([lines(9, 'out')])
+  expect(await readTexts(ui)).toEqual([lines(15, 'cmd'), '  Build it| · |80 chars'])
+  expect(await textsOf($, { ...result, props: { ...result.props, isExpanded: true } })).toEqual([lines(9, 'out'), 'rule'])
   await ui.unmount()
 })
 
@@ -294,21 +298,21 @@ test("a click on a row's line steps that row: left forward, right or ctrl+left b
     const click = (more: { button: 'left' | 'right' | 'middle'; ctrl?: true }) => ui.pointer({ type: 'down', x: 2, y: 0, ...more })
 
     await click({ button: 'left' })
-    expect(await textsOf($, result)).toEqual([`${lines(4, 'out')}\n… +5 lines`])
+    expect(await textsOf($, result)).toEqual([`${lines(4, 'out')}\n… +5 lines`, 'rule'])
     await click({ button: 'left' })
     expect(await textsOf($, result)).toEqual([])
     await click({ button: 'right' })
     await click({ button: 'right' })
-    expect(await readTexts(ui)).toEqual(['  Build it'])
+    expect(await readTexts(ui)).toEqual(['  Build it| · |80 chars'])
     await click({ button: 'left', ctrl: true })
-    expect(await textsOf($, result)).toEqual([lines(9, 'out')])
+    expect(await textsOf($, result)).toEqual([lines(9, 'out'), 'rule'])
     await click({ button: 'middle' })
-    expect(await textsOf($, result)).toEqual([lines(9, 'out')])
+    expect(await textsOf($, result)).toEqual([lines(9, 'out'), 'rule'])
 
     // Only the clicked row changed, and the command's choice is every row's again.
-    expect(await textsOf($, toolRow('c2', 'Bash', BIG))).toEqual(['  Build it'])
+    expect(await textsOf($, toolRow('c2', 'Bash', BIG))).toEqual(['  Build it| · |80 chars'])
     await toolDetail($, 'none')
-    expect(await readTexts(ui)).toEqual(['  Build it'])
+    expect(await readTexts(ui)).toEqual(['  Build it| · |80 chars'])
 
     const inverted = async () => (await ui.findAll({ type: 'Text', in: 'tool-detail' })).some(found => found.props.inverse === true)
     expect(await inverted()).toBe(false)
@@ -331,7 +335,7 @@ test('where no Client is drawn the line is a Button that steps its row forward',
   expect((await ui.find({ type: 'Button' }))?.props).toMatchObject({ key: 'tool-detail' })
   await ui.press({ key: 'tool-detail' })
   await ui.unmount()
-  expect(await textsOf($, row)).toEqual([`${lines(9, 'cmd')}\n… +6 lines`, '  Build it'])
+  expect(await textsOf($, row)).toEqual([lines(9, 'cmd'), '… +6 lines', '  Build it| · |80 chars'])
 })
 
 // An edit whose patch runs past compact's 5 lines: 4 added, 2 removed.
@@ -359,7 +363,9 @@ test('an edit row shows +added/-removed in every detail, counted from the uncut 
   const edit = toolRow('e1', 'Edit', input, { output: EDIT_RESULT })
   for (const detail of ['full', 'compact', 'input']) {
     await toolDetail($, detail)
-    expect(await textsOf($, edit)).toEqual(['Edit(…)', '  Edit a.ts| · |+4|/|-2'])
+    // Laid out bottom up, the row's tree holds its closing rule first.
+    const rule = detail === 'input' ? ['rule'] : []
+    expect(await textsOf($, edit)).toEqual([...rule, 'Edit(…)', '  Edit a.ts| · |+4|/|-2'])
   }
   await toolDetail($, 'none')
   expect(await textsOf($, edit)).toEqual(['  Edit a.ts| · |+4|/|-2'])
@@ -367,7 +373,7 @@ test('an edit row shows +added/-removed in every detail, counted from the uncut 
   expect(await textsOf($, toolRow('e2', 'Edit', input, { isErrored: true, output: 'Error: string not found' }))).toEqual(['  Edit a.ts| · |✗ failed'])
 })
 
-const numberedRow = (id: string, n?: number) => (n === undefined ? ['  Run tests'] : [`  ${n}. |Run tests`])
+const numberedRow = (id: string, n?: number) => (n === undefined ? ['  Run tests| · |8 chars'] : [`  ${n}. |Run tests| · |8 chars`])
 
 test("in ctrl+o a main-loop row opens with its place since the prompt, which an interruption doesn't start over", async ($, on) => {
   mock.clock(on, { now: 0 })
@@ -393,7 +399,7 @@ test("in ctrl+o a main-loop row opens with its place since the prompt, which an 
     expect(await textsOf($, toolRow(id, 'Bash', BASH, { isExpanded: true }))).toEqual(numberedRow(id, n))
   }
   // The main view's line draws no number.
-  expect(await textsOf($, toolRow('a2', 'Bash', BASH))).toEqual(['  Run tests'])
+  expect(await textsOf($, toolRow('a2', 'Bash', BASH))).toEqual(['  Run tests| · |8 chars'])
 })
 
 test('numberRows off draws ctrl+o rows with no number', { options: { numberRows: false } }, async ($, on) => {
@@ -447,4 +453,159 @@ test("a resumed session's rows are numbered from its transcript, and its count g
   await $.turn.start({ text: 'more', turnId: 'more' })
   await $.tool.call({ ...BASH, tool_use_id: 'r6' })
   expect(await textsOf($, toolRow('r6', 'Bash', BASH, { isExpanded: true }))).toEqual(numberedRow('r6', 4))
+})
+
+const PY_HEREDOC = "cd src && uv run python - <<'EOF'\nimport json\nprint(json.dumps({}))\nEOF\necho done"
+
+test('a command splits into its shell and the code it hands other languages', () => {
+  // No other language: one shell block.
+  expect(splitCommand('npm test && echo ok')).toEqual([{ text: 'npm test && echo ok', language: 'bash' }])
+  // A heredoc fed to python, through `uv run`, its delimiter line back in the shell.
+  expect(splitCommand(PY_HEREDOC)).toEqual([
+    { text: "cd src && uv run python - <<'EOF'", language: 'bash' },
+    { text: 'import json\nprint(json.dumps({}))', language: 'python' },
+    { text: 'EOF\necho done', language: 'bash' },
+  ])
+  // A heredoc written to a file takes the file's name; one to nothing is plain.
+  expect(splitCommand('cat > run.py <<EOF\nx = 1\nEOF')).toEqual([
+    { text: 'cat > run.py <<EOF', language: 'bash' },
+    { text: 'x = 1', path: 'run.py' },
+    { text: 'EOF', language: 'bash' },
+  ])
+  expect(splitCommand(`git commit -m "$(cat <<'EOF'\nFix it's bug\nEOF\n)"`)).toEqual([
+    { text: `git commit -m "$(cat <<'EOF'`, language: 'bash' },
+    { text: "Fix it's bug" },
+    { text: 'EOF\n)"', language: 'bash' },
+  ])
+  // A multi-line -c argument is code; a one-line one stays in the shell.
+  expect(splitCommand('python3 -c "\nimport sys\nprint(sys.argv)\n" | head')).toEqual([
+    { text: 'python3 -c "', language: 'bash' },
+    { text: 'import sys\nprint(sys.argv)', language: 'python' },
+    { text: '" | head', language: 'bash' },
+  ])
+  expect(splitCommand("python -c 'print(1)'")).toEqual([{ text: "python -c 'print(1)'", language: 'bash' }])
+  expect(splitCommand("node -e '\nconsole.log(1)\n'")[1]).toEqual({ text: 'console.log(1)', language: 'javascript' })
+  // Only an interpreter, or one run through a wrapper, reads code.
+  expect(splitCommand("echo python <<EOF\nx\nEOF")[1]).toEqual({ text: 'x' })
+  expect(splitCommand("grep -c 'a\nb' f")).toHaveLength(1)
+  // Shell code handed to a shell is split again.
+  expect(splitCommand("ssh box 'cd /srv\npython - <<EOF\nprint(1)\nEOF\n'")).toEqual([
+    { text: "ssh box 'cd /srv\npython - <<EOF", language: 'bash' },
+    { text: 'print(1)', language: 'python' },
+    { text: "EOF\n'", language: 'bash' },
+  ])
+  // `<<-` strips tabs before the delimiter; an unclosed heredoc runs to the end.
+  expect(splitCommand('psql <<-SQL\n\tselect 1;\n\tSQL\nls')[1]).toEqual({ text: '\tselect 1;', language: 'sql' })
+  expect(splitCommand('python <<EOF\nprint(1)')).toEqual([
+    { text: 'python <<EOF', language: 'bash' },
+    { text: 'print(1)', language: 'python' },
+  ])
+})
+
+test('blocks are cut to a number of lines in all, saying how many are left out', () => {
+  const blocks = splitCommand(PY_HEREDOC)
+  expect(cutSegments(blocks, 10)).toEqual({ segments: blocks, hidden: 0 })
+  expect(cutSegments(blocks, 3)).toEqual({
+    segments: [blocks[0], { text: 'import json', language: 'python' }],
+    hidden: 3,
+  })
+})
+
+test('a shell row past none draws its command highlighted, Bash and PowerShell alike; full keeps the engine row', async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+  await toolDetail($, 'input')
+  const bash = toolRow('h1', 'Bash', { command: PY_HEREDOC, description: 'Dump it' })
+  const ui = await $.ui.mount(bash)
+  const codes = await ui.findAll({ type: 'Code' })
+  expect(codes.map(c => c.props.language)).toEqual(['bash', 'python', 'bash'])
+  expect(codes[1]!.text).toBe('import json\nprint(json.dumps({}))')
+  expect(await readTexts(ui)).toEqual([...codes.map(c => c.text), 'rule', '  Dump it| · |81 chars'])
+  await ui.unmount()
+
+  const ps = await $.ui.mount(toolRow('p1', 'PowerShell', { command: "@'\nprint(1)\n'@ | python -", description: 'Run it' }))
+  expect((await ps.findAll({ type: 'Code' })).map(c => c.props.language)).toEqual(['powershell', 'python', 'powershell'])
+  await ps.unmount()
+
+  await toolDetail($, 'full')
+  expect(await textsOf($, bash)).toEqual([PY_HEREDOC, '  Dump it| · |81 chars'])
+})
+
+test('highlightCommands off leaves the command to the engine row', { options: { highlightCommands: false } }, async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+  await toolDetail($, 'input')
+  expect(await textsOf($, toolRow('h1', 'Bash', { command: PY_HEREDOC, description: 'Dump it' }))).toEqual(['rule', PY_HEREDOC, '  Dump it| · |81 chars'])
+})
+
+const childTypes = (box: { children: unknown[] }) => box.children.map(child => (child as { type?: string }).type)
+
+test('past none the line heads the row with no blank line, a rule closes it, and the line stays on top to be clicked', async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+  const edit = toolRow('o1', 'Edit', { file_path: 'a.ts', old_string: 'a', new_string: 'b' }, { output: EDIT_RESULT })
+
+  // Over the engine's row: laid out bottom up, so the line, on top, is drawn
+  // last; the engine's row pulled up a line over its own top margin.
+  await toolDetail($, 'full')
+  const full = await $.ui.mount(edit)
+  const [outer, engineRow] = await full.findAll({ type: 'Box' })
+  expect(outer!.props).toMatchObject({ flexDirection: 'column-reverse' })
+  expect(outer!.props.marginTop).toBeUndefined()
+  expect(childTypes(outer!)).toEqual(['Box', 'Client'])
+  expect(engineRow!.props.marginTop).toBe(-1)
+  await full.unmount()
+  // The output closes with the rule in compact and full, the input in input.
+  expect(await textsOf($, { ...result, requestId: 'o1', props: { ...result.props, tool_use_id: 'o1' } })).toEqual([lines(9, 'out'), 'rule'])
+  await toolDetail($, 'input')
+  const input = await $.ui.mount(edit)
+  expect(childTypes((await input.findAll({ type: 'Box' }))[0]!)).toEqual(['Box', 'Box', 'Client'])
+  expect(await input.find({ type: 'Box', key: 'tool-rule' })).toBeDefined()
+  await input.unmount()
+
+  // A highlighted row draws no engine row, so it lies top down.
+  const highlighted = await $.ui.mount(toolRow('o2', 'Bash', BIG))
+  expect(childTypes((await highlighted.findAll({ type: 'Box' }))[0]!)).toEqual(['Client', 'Box', 'Box'])
+  await highlighted.unmount()
+
+  // In none the rows stack, the line alone.
+  await toolDetail($, 'none')
+  const bare = await $.ui.mount(edit)
+  expect(await bare.findAll({ type: 'Box' })).toEqual([])
+  await bare.unmount()
+})
+
+test('a call is sized in characters: its command or prompt in, its main text out', () => {
+  expect(sizeOf({ command: 'a\nb\nc' }, { stdout: 'x\ny\n', stderr: 'warn' })).toEqual({ input: 5, output: 8 })
+  expect(sizeOf({ file_path: 'a.ts' }, { type: 'text', file: { content: 'hello', numLines: 1 } }).output).toBe(5)
+  expect(sizeOf({ pattern: 'x' }, { mode: 'content', filenames: [], content: 'a\nb', numLines: 2 }).output).toBe(3)
+  expect(sizeOf({ pattern: '*.ts' }, { filenames: ['a', 'bb'], numFiles: 2 }).output).toBe(4)
+  expect(sizeOf({ prompt: 'go' }, { content: [{ type: 'text', text: 'one\ntwo' }] })).toEqual({ input: 2, output: 7 })
+  expect(sizeOf({ url: 'u', prompt: 'p' }, { result: 'r1\nr2' }).output).toBe(5)
+  expect(sizeOf({ q: 1 }, [{ type: 'text', text: 'mcp' }]).output).toBe(3)
+  // A file change has its +/- instead.
+  expect(sizeOf({ file_path: 'a' }, { structuredPatch: [{ lines: ['+a'] }] }).output).toBeUndefined()
+})
+
+test('a size reads input then output, exact under a hundred and cut short past it', () => {
+  expect(sizeText({ input: 42, output: 1204 })).toBe('42 → 1.2k chars')
+  expect(sizeText({ input: 31_204, output: 2_400_000 })).toBe('31k → 2.4M chars')
+  expect(sizeText({ input: 1, output: undefined })).toBe('1 char')
+  expect(sizeText({ input: 8, output: 0 })).toBe('8 → 0 chars')
+  expect(sizeText({ input: undefined, output: 85 })).toBe('→ 85 chars')
+  expect(sizeText({ input: undefined, output: undefined })).toBeUndefined()
+  expect([99, 100, 150, 949, 950, 1000, 1050, 9_960, 10_400, 999_499, 999_500, 12_345_678].map(abbreviated)).toEqual([
+    '99', '0.1k', '0.2k', '0.9k', '1k', '1k', '1.1k', '10k', '10k', '999k', '1M', '12M',
+  ])
+})
+
+test("a row's line says its input's size while it runs, its output's once finished, and none once failed", async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+  const ran = toolRow('s1', 'Bash', { command: 'make\nmake test', description: 'Build' }, { output: { stdout: lines(40), stderr: '' } })
+  expect(await textsOf($, ran)).toEqual(['  Build| · |14 → 0.2k chars'])
+  const running = toolRow('s2', 'Bash', { command: 'make\nmake test', description: 'Build' }, { isRunning: true })
+  expect(await textsOf($, running)).toEqual(['  Build| · |14 chars| · |running'])
+  const failed = toolRow('s3', 'Bash', { command: 'make\nmake test', description: 'Build' }, { isErrored: true, output: 'boom' })
+  expect(await textsOf($, failed)).toEqual(['  Build| · |✗ failed'])
 })
