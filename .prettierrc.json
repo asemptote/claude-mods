@@ -1,0 +1,8 @@
+{
+  "semi": false,
+  "singleQuote": true,
+  "printWidth": 140,
+  "arrowParens": "avoid",
+  "trailingComma": "all",
+  "overrides": [{ "files": "*/tests/**", "options": { "printWidth": 160 } }]
+}

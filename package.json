@@ -1,0 +1,15 @@
+{
+  "private": true,
+  "description": "Tooling for the mods in this repository; no mod depends on it.",
+  "scripts": {
+    "typecheck": "tsc -p tool-status",
+    "test": "claude plugin test tool-status",
+    "format": "prettier --write \"*/hooks/**/*.{ts,tsx}\" \"*/tests/**/*.{ts,tsx}\" \"*/types/**/*.ts\"",
+    "format:check": "prettier --check \"*/hooks/**/*.{ts,tsx}\" \"*/tests/**/*.{ts,tsx}\" \"*/types/**/*.ts\"",
+    "check": "npm run typecheck && npm run format:check && npm test"
+  },
+  "devDependencies": {
+    "prettier": "^3.10.1",
+    "typescript": "^7.0.2"
+  }
+}
