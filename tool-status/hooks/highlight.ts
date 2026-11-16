@@ -90,6 +90,11 @@ const WRAPPERS = new Set([
 const WRITERS = new Set(['cat', 'tee', 'set-content', 'add-content', 'out-file', 'tee-object'])
 const PATH_FLAGS = new Set(['-path', '-filepath', '-literalpath'])
 
+// Files whose extension the engine's highlighter does not resolve, though it
+// has the language: the language is named outright instead of the path.
+const EXTENSION_LANGUAGES: Record<string, string> = { jl: 'julia' }
+const languageOfPath = (path: string) => EXTENSION_LANGUAGES[/\.([^./\\]+)$/.exec(path)?.[1]?.toLowerCase() ?? '']
+
 // A command's name as the tables key it: no folder, no `.exe`, no version.
 const nameOf = (word: string) =>
   (word.split(/[\\/]/).pop() ?? word)
@@ -578,8 +583,15 @@ function slices(src: string, shell: Shell, depth: number): Piece[] {
     const text = src.slice(region.start, region.end)
     if (isShell(region.language)) out.push(...slices(text, region.language, depth + 1))
     else {
+      const named = region.path === undefined ? undefined : languageOfPath(region.path)
       const where: Where =
-        region.language !== undefined ? { language: region.language } : region.path !== undefined ? { path: region.path } : {}
+        region.language !== undefined
+          ? { language: region.language }
+          : named !== undefined
+            ? { language: named }
+            : region.path !== undefined
+              ? { path: region.path }
+              : {}
       out.push({ text, ...where })
     }
     at = region.end

@@ -562,6 +562,14 @@ test('a command splits into its shell and the code it hands other languages', ()
   ])
 })
 
+test('a file the engine cannot place by its extension is written in its language, named outright', () => {
+  expect(splitCommand('cat > run.jl <<EOF\nx = 1\nEOF')[1]).toEqual({ text: 'x = 1', language: 'julia', line: 2 })
+  expect(splitCommand("cat <<'EOF' > src/Model.JL\nf(x) = x\nEOF")[1]).toEqual({ text: 'f(x) = x', language: 'julia', line: 2 })
+  expect(splitCommand("Set-Content run.jl -Value @'\nx = 1\n'@", 'powershell')[1]).toEqual({ text: 'x = 1', language: 'julia', line: 2 })
+  // Others keep their path, for the engine to place.
+  expect(splitCommand('cat > run.py <<EOF\nx = 1\nEOF')[1]).toEqual({ text: 'x = 1', path: 'run.py', line: 2 })
+})
+
 test("a block says the command's line it starts on, a mid-line one sharing it, CRLF counted as one break", () => {
   // `-c` code opening mid-line shares line 1 with the shell before it.
   expect(splitCommand('python -c "import x\nprint(1)"').map(s => [s.language, s.line])).toEqual([
