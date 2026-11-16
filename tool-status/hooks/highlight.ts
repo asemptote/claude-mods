@@ -18,6 +18,8 @@ export type Segment = {
   language?: string
   /** A file name the language is inferred from (a heredoc written to `x.py`). */
   path?: string
+  /** The command's line, from 1, its first row is on: the gutter's first number. */
+  line: number
 }
 
 const MAX_DEPTH = 4
@@ -76,6 +78,8 @@ const INTERPRETERS: Record<string, Interpreter> = {
 // Commands that run the next one (`uv run python`, `docker exec box sh`): an
 // interpreter is looked for past these, and past nothing else, so `echo
 // python` names none.
+// A table, packed by hand.
+// prettier-ignore
 const WRAPPERS = new Set([
   'uv', 'uvx', 'env', 'sudo', 'doas', 'time', 'nohup', 'exec', 'command', 'builtin', 'nice', 'timeout', 'stdbuf',
   'xargs', 'npx', 'pnpm', 'yarn', 'poetry', 'pipenv', 'pdm', 'hatch', 'rye', 'conda', 'mamba', 'micromamba', 'pixi',
@@ -110,7 +114,8 @@ type Region = { start: number; end: number } & Where
 // call operators (`& "C:\py\python.exe"`).
 const firstWord = (words: readonly Word[]) => {
   let first = 0
-  while (first < words.length && (/^[A-Za-z_]\w*=/.test(words[first]!.value) || words[first]!.value === '&' || words[first]!.value === '.')) first++
+  while (first < words.length && (/^[A-Za-z_]\w*=/.test(words[first]!.value) || words[first]!.value === '&' || words[first]!.value === '.'))
+    first++
   return first
 }
 
@@ -286,7 +291,7 @@ function bashRegions(src: string): Region[] {
       const start = pos
       let end = src.length
       let next = src.length
-      for (let p = pos; p < src.length; ) {
+      for (let p = pos; p < src.length;) {
         const nl = src.indexOf('\n', p)
         const lineEnd = nl < 0 ? src.length : nl
         const line = src.slice(p, lineEnd).replace(/\r$/, '')
@@ -410,11 +415,13 @@ function powershellRegions(src: string): Region[] {
     const { words } = f.command
     if (piped?.quote !== undefined && words.length > 0) {
       const where = fedTo(f.command)
-      if (where.language !== undefined || where.path !== undefined) regions.push({ start: piped.quote.open + 1, end: piped.quote.close, ...where })
+      if (where.language !== undefined || where.path !== undefined)
+        regions.push({ start: piped.quote.open + 1, end: piped.quote.close, ...where })
       piped = undefined
     }
     const only = words.length === 1 ? words[0] : undefined
-    if (isPipe && only?.quote !== undefined && (only.quote.isBlock || src.slice(only.quote.open + 1, only.quote.close).includes('\n'))) piped = only
+    if (isPipe && only?.quote !== undefined && (only.quote.isBlock || src.slice(only.quote.open + 1, only.quote.close).includes('\n')))
+      piped = only
     else if (words.length > 0) piped = undefined
     resetCommand(f)
   }
@@ -431,7 +438,7 @@ function powershellRegions(src: string): Region[] {
     const q = src[i + 1]!
     const nl = src.indexOf('\n', i + 2)
     let closeLine = src.length
-    for (let p = nl + 1; p < src.length; ) {
+    for (let p = nl + 1; p < src.length;) {
       if (src.startsWith(`${q}@`, p)) {
         closeLine = p
         break
@@ -441,7 +448,9 @@ function powershellRegions(src: string): Region[] {
       p = next + 1
     }
     const word = join(f, i)
-    const close = closeLine === src.length ? src.length : Math.max(nl, closeLine - 1)
+    // The body ends before the close's line break, a CRLF's `\r` included.
+    const lineBreak = src[closeLine - 2] === '\r' ? 2 : 1
+    const close = closeLine === src.length ? src.length : Math.max(nl, closeLine - lineBreak)
     word.value += src.slice(nl + 1, close)
     if (word.start === i) word.quote = { open: nl, close, isBlock: true }
     return closeLine === src.length ? src.length : closeLine + 2
@@ -497,7 +506,7 @@ function powershellRegions(src: string): Region[] {
     } else if (c === "'") {
       const word = join(f, i)
       let end = src.length
-      for (let j = i + 1; j < src.length; ) {
+      for (let j = i + 1; j < src.length;) {
         const at = src.indexOf("'", j)
         if (at < 0) break
         if (src[at + 1] === "'") j = at + 2
@@ -555,9 +564,12 @@ function powershellRegions(src: string): Region[] {
 const SCANNERS: Record<Shell, (src: string) => Region[]> = { bash: bashRegions, powershell: powershellRegions }
 const isShell = (language: string | undefined): language is Shell => language === 'bash' || language === 'powershell'
 
+// A slice of a command, before blocks are merged and placed.
+type Piece = { text: string } & Where
+
 // Exact slices: joined, they are `src` again.
-function slices(src: string, shell: Shell, depth: number): Segment[] {
-  const out: Segment[] = []
+function slices(src: string, shell: Shell, depth: number): Piece[] {
+  const out: Piece[] = []
   let at = 0
   const regions = depth >= MAX_DEPTH ? [] : SCANNERS[shell](src).sort((a, b) => a.start - b.start)
   for (const region of regions) {
@@ -576,21 +588,63 @@ function slices(src: string, shell: Shell, depth: number): Segment[] {
   return out
 }
 
+// The line, from 1, that `offset` in `src` is on.
+function lineAt(src: string, offset: number) {
+  let line = 1
+  for (let i = src.indexOf('\n'); i !== -1 && i < offset; i = src.indexOf('\n', i + 1)) line++
+  return line
+}
+
 /**
  * The blocks a command draws as, in order: neighbours in one language
  * merged, each block's own line breaks at its edges dropped (a block starts
- * on a row of its own), blank ones left out.
+ * on a row of its own), blank ones left out. Each says the command's line it
+ * starts on, which the slices, being exact, give by their running length: a
+ * block opening mid-line (`python -c "import x`) shares that line's number
+ * with the shell's row before it.
  */
 export function splitCommand(command: string, shell: Shell = 'bash'): Segment[] {
-  const merged: Segment[] = []
+  const merged: (Piece & { start: number })[] = []
+  let at = 0
   for (const piece of slices(command, shell, 0)) {
+    const start = at
+    at += piece.text.length
     const last = merged[merged.length - 1]
     if (last !== undefined && last.language === piece.language && last.path === piece.path) last.text += piece.text
-    else merged.push({ ...piece })
+    else merged.push({ ...piece, start })
   }
   return merged
-    .map(s => ({ ...s, text: s.text.replace(/^\r?\n/, '').replace(/\r?\n[ \t]*$/, '') }))
+    .map(({ start, ...s }) => {
+      const lead = /^\r?\n/.exec(s.text)?.[0].length ?? 0
+      return { ...s, text: s.text.slice(lead).replace(/\r?\n[ \t]*$/, ''), line: lineAt(command, start + lead) }
+    })
     .filter(s => s.text.trim() !== '')
+}
+
+/**
+ * How far to set each block in so their gutters line up: `Code` sizes a
+ * block's gutter to its own last number, so a block ending on line 9 has one
+ * column of digits where one ending on line 10 has two. Each is set in by
+ * the columns it lacks against the widest.
+ */
+export function gutterPads(segments: readonly Segment[]): number[] {
+  const widths = segments.map(s => String(s.line + s.text.split('\n').length - 1).length)
+  const widest = Math.max(0, ...widths)
+  return widths.map(width => widest - width)
+}
+
+/** How far a block in another language than the command's shell is set in. */
+export const NESTED_INDENT = 2
+
+/**
+ * How far to set each block in: by the gutter columns it lacks, when
+ * numbered, and by `NESTED_INDENT` when its language is not the command's
+ * shell (a heredoc's body, plain text included). The numbers then end in one
+ * column per level, stepping in where the language changes.
+ */
+export function blockIndents(segments: readonly Segment[], shell: Shell, isNumbered: boolean): number[] {
+  const pads = isNumbered ? gutterPads(segments) : segments.map(() => 0)
+  return segments.map((s, i) => (pads[i] ?? 0) + (s.language === shell ? 0 : NESTED_INDENT))
 }
 
 /** Blocks cut to `max` lines in all, and how many lines were left out. */

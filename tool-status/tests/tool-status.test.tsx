@@ -3,7 +3,8 @@ import type { Engine, MountTarget } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { abbreviated, age, compact, describe, diffOf, numberCalls, sizeOf, sizeText, stepDetail, took } from '../hooks/format'
-import { cutSegments, splitCommand } from '../hooks/highlight'
+import { blockIndents, cutSegments, gutterPads, splitCommand } from '../hooks/highlight'
+import type { Shell } from '../hooks/highlight'
 
 const PLUGIN = 'tool-status'
 const START = { cwd: '.', surface: 'terminal', isInteractive: true } as const
@@ -350,7 +351,13 @@ test('counts the lines a call added and removed, by the shape of its result', ()
   expect(diffOf({ ...EDIT_RESULT, staged: true })).toBeUndefined()
   expect(diffOf({ type: 'create', filePath: 'b.ts', content: 'a\nb\nc\n', structuredPatch: [] })).toEqual({ added: 3, removed: 0 })
   expect(diffOf({ type: 'update', filePath: 'b.ts', content: '', structuredPatch: [] })).toBeUndefined()
-  const bashEditDiff = { files: [{ filePath: 'x', hunks: [{ lines: ['+1', '+2', '-3'] }] }, { filePath: 'y', hunks: [{ lines: ['+4'] }] }], moreFiles: 0 }
+  const bashEditDiff = {
+    files: [
+      { filePath: 'x', hunks: [{ lines: ['+1', '+2', '-3'] }] },
+      { filePath: 'y', hunks: [{ lines: ['+4'] }] },
+    ],
+    moreFiles: 0,
+  }
   expect(diffOf({ stdout: '', bashEditDiff })).toEqual({ added: 3, removed: 1 })
   expect(diffOf({ stdout: 'ok' })).toBeUndefined()
   expect(diffOf('Error: string not found')).toBeUndefined()
@@ -455,58 +462,190 @@ test("a resumed session's rows are numbered from its transcript, and its count g
   expect(await textsOf($, toolRow('r6', 'Bash', BASH, { isExpanded: true }))).toEqual(numberedRow('r6', 4))
 })
 
+test('parallel main-loop calls are numbered in the order they were made', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  const tool = engine(on)
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  await $.turn.start({ text: 'go', turnId: 'go' })
+  const ids = ['p1', 'p2', 'p3']
+  const calls = ids.map(id => $.tool.call({ ...BASH, tool_use_id: id }))
+  tool.release()
+  await Promise.all(calls)
+  for (const [i, id] of ids.entries()) {
+    expect(await textsOf($, toolRow(id, 'Bash', BASH, { isExpanded: true }))).toEqual(numberedRow(id, i + 1))
+  }
+})
+
+test("the transcript is read once, and never for a row this process saw run, a subagent's included", async ($, on) => {
+  mock.clock(on, { now: 0 })
+  engine(on).release()
+  let reads = 0
+  on('session.messages', () => {
+    reads++
+    return { value: TRANSCRIPT } as never
+  })
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  await $.session.start(START)
+  await $.turn.start({ text: 'more', turnId: 'more' })
+  await $.tool.call({ ...BASH, tool_use_id: 's1', agentId: 'sub' } as never)
+  await $.tool.call({ ...BASH, tool_use_id: 'm1' })
+
+  const row = (id: string) => textsOf($, toolRow(id, 'Bash', BASH, { isExpanded: true }))
+  expect(await row('s1')).toEqual(numberedRow('s1'))
+  expect(await row('m1')).toEqual(numberedRow('m1', 4))
+  expect(await row('r2')).toEqual(numberedRow('r2', 2))
+  // A call in no transcript and no record is unnumbered, and asks no read.
+  expect(await row('elsewhere')).toEqual(numberedRow('elsewhere'))
+  expect(reads).toBe(1)
+})
+
+test("a reload goes on with the count the host kept, not the transcript's", async ($, on) => {
+  mock.clock(on, { now: 0 })
+  engine(on).release()
+  on('session.messages', () => ({ value: TRANSCRIPT }) as never)
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  await $.session.start(START)
+  await $.turn.start({ text: 'more', turnId: 'more' })
+  await $.tool.call({ ...BASH, tool_use_id: 'k1' })
+  await $.tool.call({ ...BASH, tool_use_id: 'k2' })
+  // A reload fires `session.start` again; the transcript, read then, still
+  // ends at 3, behind the live count.
+  await $.session.start(START)
+  await $.tool.call({ ...BASH, tool_use_id: 'k3' })
+  expect(await textsOf($, toolRow('k3', 'Bash', BASH, { isExpanded: true }))).toEqual(numberedRow('k3', 6))
+})
+
 const PY_HEREDOC = "cd src && uv run python - <<'EOF'\nimport json\nprint(json.dumps({}))\nEOF\necho done"
 
 test('a command splits into its shell and the code it hands other languages', () => {
   // No other language: one shell block.
-  expect(splitCommand('npm test && echo ok')).toEqual([{ text: 'npm test && echo ok', language: 'bash' }])
+  expect(splitCommand('npm test && echo ok')).toEqual([{ text: 'npm test && echo ok', language: 'bash', line: 1 }])
   // A heredoc fed to python, through `uv run`, its delimiter line back in the shell.
   expect(splitCommand(PY_HEREDOC)).toEqual([
-    { text: "cd src && uv run python - <<'EOF'", language: 'bash' },
-    { text: 'import json\nprint(json.dumps({}))', language: 'python' },
-    { text: 'EOF\necho done', language: 'bash' },
+    { text: "cd src && uv run python - <<'EOF'", language: 'bash', line: 1 },
+    { text: 'import json\nprint(json.dumps({}))', language: 'python', line: 2 },
+    { text: 'EOF\necho done', language: 'bash', line: 4 },
   ])
   // A heredoc written to a file takes the file's name; one to nothing is plain.
   expect(splitCommand('cat > run.py <<EOF\nx = 1\nEOF')).toEqual([
-    { text: 'cat > run.py <<EOF', language: 'bash' },
-    { text: 'x = 1', path: 'run.py' },
-    { text: 'EOF', language: 'bash' },
+    { text: 'cat > run.py <<EOF', language: 'bash', line: 1 },
+    { text: 'x = 1', path: 'run.py', line: 2 },
+    { text: 'EOF', language: 'bash', line: 3 },
   ])
   expect(splitCommand(`git commit -m "$(cat <<'EOF'\nFix it's bug\nEOF\n)"`)).toEqual([
-    { text: `git commit -m "$(cat <<'EOF'`, language: 'bash' },
-    { text: "Fix it's bug" },
-    { text: 'EOF\n)"', language: 'bash' },
+    { text: `git commit -m "$(cat <<'EOF'`, language: 'bash', line: 1 },
+    { text: "Fix it's bug", line: 2 },
+    { text: 'EOF\n)"', language: 'bash', line: 3 },
   ])
   // A multi-line -c argument is code; a one-line one stays in the shell.
   expect(splitCommand('python3 -c "\nimport sys\nprint(sys.argv)\n" | head')).toEqual([
-    { text: 'python3 -c "', language: 'bash' },
-    { text: 'import sys\nprint(sys.argv)', language: 'python' },
-    { text: '" | head', language: 'bash' },
+    { text: 'python3 -c "', language: 'bash', line: 1 },
+    { text: 'import sys\nprint(sys.argv)', language: 'python', line: 2 },
+    { text: '" | head', language: 'bash', line: 4 },
   ])
-  expect(splitCommand("python -c 'print(1)'")).toEqual([{ text: "python -c 'print(1)'", language: 'bash' }])
-  expect(splitCommand("node -e '\nconsole.log(1)\n'")[1]).toEqual({ text: 'console.log(1)', language: 'javascript' })
+  expect(splitCommand("python -c 'print(1)'")).toEqual([{ text: "python -c 'print(1)'", language: 'bash', line: 1 }])
+  expect(splitCommand("node -e '\nconsole.log(1)\n'")[1]).toEqual({ text: 'console.log(1)', language: 'javascript', line: 2 })
   // Only an interpreter, or one run through a wrapper, reads code.
-  expect(splitCommand("echo python <<EOF\nx\nEOF")[1]).toEqual({ text: 'x' })
+  expect(splitCommand('echo python <<EOF\nx\nEOF')[1]).toEqual({ text: 'x', line: 2 })
   expect(splitCommand("grep -c 'a\nb' f")).toHaveLength(1)
   // Shell code handed to a shell is split again.
   expect(splitCommand("ssh box 'cd /srv\npython - <<EOF\nprint(1)\nEOF\n'")).toEqual([
-    { text: "ssh box 'cd /srv\npython - <<EOF", language: 'bash' },
-    { text: 'print(1)', language: 'python' },
-    { text: "EOF\n'", language: 'bash' },
+    { text: "ssh box 'cd /srv\npython - <<EOF", language: 'bash', line: 1 },
+    { text: 'print(1)', language: 'python', line: 3 },
+    { text: "EOF\n'", language: 'bash', line: 4 },
   ])
   // `<<-` strips tabs before the delimiter; an unclosed heredoc runs to the end.
-  expect(splitCommand('psql <<-SQL\n\tselect 1;\n\tSQL\nls')[1]).toEqual({ text: '\tselect 1;', language: 'sql' })
+  expect(splitCommand('psql <<-SQL\n\tselect 1;\n\tSQL\nls')[1]).toEqual({ text: '\tselect 1;', language: 'sql', line: 2 })
   expect(splitCommand('python <<EOF\nprint(1)')).toEqual([
-    { text: 'python <<EOF', language: 'bash' },
-    { text: 'print(1)', language: 'python' },
+    { text: 'python <<EOF', language: 'bash', line: 1 },
+    { text: 'print(1)', language: 'python', line: 2 },
   ])
+})
+
+test("a block says the command's line it starts on, a mid-line one sharing it, CRLF counted as one break", () => {
+  // `-c` code opening mid-line shares line 1 with the shell before it.
+  expect(splitCommand('python -c "import x\nprint(1)"').map(s => [s.language, s.line])).toEqual([
+    ['bash', 1],
+    ['python', 1],
+    ['bash', 2],
+  ])
+  // A here-string's body starts past its opening line break, CRLF or LF.
+  const ps = "Get-Date\r\n@'\r\nprint(1)\r\nprint(2)\r\n'@ | python -"
+  expect(splitCommand(ps, 'powershell').map(s => [s.text, s.line])).toEqual([
+    ["Get-Date\r\n@'", 1],
+    ['print(1)\r\nprint(2)', 3],
+    ["'@ | python -", 5],
+  ])
+  // Lines between blocks left out still count.
+  expect(splitCommand('cd a\n\n\npython - <<EOF\nx = 1\nEOF').map(s => s.line)).toEqual([1, 5, 6])
+})
+
+// Commands of every shape the splitter reads, each mutated below as a model
+// might cut or garble it.
+const SHAPES: [string, Shell][] = [
+  [PY_HEREDOC, 'bash'],
+  ['cat > run.py <<EOF\nx = 1\nEOF', 'bash'],
+  [`git commit -m "$(cat <<'EOF'\nFix it's bug\nEOF\n)"`, 'bash'],
+  ['python3 -c "\nimport sys\nprint(sys.argv)\n" | head', 'bash'],
+  ['python -c "import x\nprint(1)"', 'bash'],
+  ["node -e '\nconsole.log(`a ${1}`)\n'", 'bash'],
+  ["ssh box 'cd /srv\npython - <<EOF\nprint(1)\nEOF\n'", 'bash'],
+  ["bash -c \"echo $(date) && python3 - <<'PY'\nx = '\\\"'\nPY\n\"", 'bash'],
+  ['psql <<-SQL\n\tselect 1;\n\tSQL\nls', 'bash'],
+  ['X=1 uv run python <<EOF\nprint(1)', 'bash'],
+  ["Get-Date\r\n@'\r\nprint(1)\r\n'@ | python -", 'powershell'],
+  ["python -c @'\nimport os\nprint(os.getcwd())\n'@", 'powershell'],
+  ['Set-Content run.js -Value @"\nconsole.log($x)\n"@\nnode run.js', 'powershell'],
+  ["pwsh -c \"& 'C:\\py\\python.exe' -c 'print(1)'\" <# note #> ; `\n echo ok", 'powershell'],
+]
+
+// What every split keeps, however broken its command: no throw, every
+// non-space character in some block, and each block on the line it says.
+function splitHolds(command: string, shell: Shell) {
+  const blocks = splitCommand(command, shell)
+  const squash = (text: string) => text.replace(/\s+/g, '')
+  if (squash(blocks.map(b => b.text).join('')) !== squash(command)) return `lost text: ${JSON.stringify(command)}`
+  const lines = command.split('\n')
+  let previous = 0
+  for (const block of blocks) {
+    const first = block.text.split('\n')[0]!.replace(/\r$/, '')
+    if (block.line < previous || !(lines[block.line - 1] ?? '').includes(first)) return `line ${block.line} wrong: ${JSON.stringify(command)}`
+    previous = block.line
+  }
+  return undefined
+}
+
+test('any command splits without loss, each block on its line: cut, garbled or CRLF, in either shell', () => {
+  const failures: string[] = []
+  let runs = 0
+  const check = (command: string, shell: Shell) => {
+    runs++
+    try {
+      const failure = splitHolds(command, shell)
+      if (failure !== undefined) failures.push(`${shell} ${failure}`)
+    } catch (error) {
+      failures.push(`${shell} threw ${String(error)}: ${JSON.stringify(command)}`)
+    }
+  }
+  for (const [command, own] of SHAPES) {
+    for (const shell of [own, own === 'bash' ? 'powershell' : 'bash'] as const) {
+      check(command.replace(/\r?\n/g, '\r\n'), shell)
+      for (let at = 0; at <= command.length; at++) {
+        check(command.slice(0, at), shell)
+        check(command.slice(0, at) + command.slice(at + 1), shell)
+        for (const c of `'"\`@<($`) check(command.slice(0, at) + c + command.slice(at), shell)
+      }
+    }
+  }
+  expect(failures.slice(0, 5)).toEqual([])
+  expect(runs).toBeGreaterThan(10_000)
 })
 
 test('blocks are cut to a number of lines in all, saying how many are left out', () => {
   const blocks = splitCommand(PY_HEREDOC)
   expect(cutSegments(blocks, 10)).toEqual({ segments: blocks, hidden: 0 })
   expect(cutSegments(blocks, 3)).toEqual({
-    segments: [blocks[0], { text: 'import json', language: 'python' }],
+    segments: [blocks[0], { text: 'import json', language: 'python', line: 2 }],
     hidden: 3,
   })
 })
@@ -529,6 +668,61 @@ test('a shell row past none draws its command highlighted, Bash and PowerShell a
 
   await toolDetail($, 'full')
   expect(await textsOf($, bash)).toEqual([PY_HEREDOC, '  Dump it| · |81 chars'])
+})
+
+const startLines = async ($: Engine, target: MountTarget) => {
+  const ui = await $.ui.mount(target)
+  const found = (await ui.findAll({ type: 'Code' })).map(c => c.props.startLine)
+  await ui.unmount()
+  return found
+}
+
+test("a highlighted command's blocks are numbered by the command's lines, compact's cut ones too", async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+  await toolDetail($, 'input')
+  expect(await startLines($, toolRow('g1', 'Bash', { command: PY_HEREDOC, description: 'Dump it' }))).toEqual([1, 2, 4])
+  await toolDetail($, 'compact')
+  const long = `python - <<EOF\n${lines(20, 'x = ')}\nEOF`
+  expect(await startLines($, toolRow('g2', 'Bash', { command: long, description: 'Long' }))).toEqual([1, 2])
+})
+
+test('blocks are set in by the gutter columns they lack, so every number ends in one column', () => {
+  // Lines 1-2 in the shell, 3-12 in Python, 13 back in the shell: one digit, then two.
+  const command = `cd src\npython - <<'EOF'\n${lines(9, 'x = ')}\nEOF`
+  const blocks = splitCommand(command)
+  expect(blocks.map(b => b.line)).toEqual([1, 3, 12])
+  expect(gutterPads(blocks)).toEqual([1, 0, 0])
+  expect(gutterPads(splitCommand(PY_HEREDOC))).toEqual([0, 0, 0])
+  expect(gutterPads([])).toEqual([])
+})
+
+test('a block in another language is set a level in, its gutter with it; one in the same shell is not', () => {
+  const command = `cd src\npython - <<'EOF'\n${lines(9, 'x = ')}\nEOF`
+  expect(blockIndents(splitCommand(command), 'bash', true)).toEqual([1, 2, 0])
+  expect(blockIndents(splitCommand(command), 'bash', false)).toEqual([0, 2, 0])
+  // Bash inside bash stays at the shell's level; a commit message's plain text goes in.
+  expect(blockIndents(splitCommand("ssh box 'cd /srv\npython - <<EOF\nprint(1)\nEOF\n'"), 'bash', false)).toEqual([0, 2, 0])
+  expect(blockIndents(splitCommand(`git commit -F - <<'EOF'\nFix it\nEOF`), 'bash', false)).toEqual([0, 2, 0])
+  expect(blockIndents(splitCommand("@'\nprint(1)\n'@ | python -", 'powershell'), 'powershell', false)).toEqual([0, 2, 0])
+})
+
+test('a row sets each block in by its pad, and none without a gutter', async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+  await toolDetail($, 'input')
+  const command = `python - <<'EOF'\n${lines(12, 'x = ')}\nEOF`
+  const ui = await $.ui.mount(toolRow('g4', 'Bash', { command, description: 'Long' }))
+  const boxes = await ui.findAll({ type: 'Box' })
+  expect(boxes.filter(b => b.key?.startsWith('code-')).map(b => b.props.paddingLeft)).toEqual([1, 2, 0])
+  await ui.unmount()
+})
+
+test('numberInputLines off draws no gutter', { options: { numberInputLines: false } }, async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+  await toolDetail($, 'input')
+  expect(await startLines($, toolRow('g3', 'Bash', { command: PY_HEREDOC, description: 'Dump it' }))).toEqual([undefined, undefined, undefined])
 })
 
 test('highlightCommands off leaves the command to the engine row', { options: { highlightCommands: false } }, async ($, on) => {
@@ -595,7 +789,18 @@ test('a size reads input then output, exact under a hundred and cut short past i
   expect(sizeText({ input: undefined, output: 85 })).toBe('→ 85 chars')
   expect(sizeText({ input: undefined, output: undefined })).toBeUndefined()
   expect([99, 100, 150, 949, 950, 1000, 1050, 9_960, 10_400, 999_499, 999_500, 12_345_678].map(abbreviated)).toEqual([
-    '99', '0.1k', '0.2k', '0.9k', '1k', '1k', '1.1k', '10k', '10k', '999k', '1M', '12M',
+    '99',
+    '0.1k',
+    '0.2k',
+    '0.9k',
+    '1k',
+    '1k',
+    '1.1k',
+    '10k',
+    '10k',
+    '999k',
+    '1M',
+    '12M',
   ])
 })
 

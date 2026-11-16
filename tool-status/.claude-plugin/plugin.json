@@ -1,6 +1,6 @@
 {
   "name": "tool-status",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Names the running tool call on the spinner, with what it is doing under it and its time, and the time since the last call while none runs. Each tool row gets a line naming the call, with +added/-removed lines, its input and output size in characters, its time and any failure, numbered from the prompt in the ctrl+o transcript; /tool-detail sets how much of every row shows (none, compact, input, full), and clicking a row's line steps that row alone (right or ctrl+click steps back). Past none the line heads the row and a dim rule closes it, and Bash and PowerShell commands are drawn highlighted, each heredoc, here-string or multi-line -c argument in its own language. Other parties' messages fold the same way in the ctrl+o transcript.",
   "author": {
     "name": "Asem Wardak"
@@ -18,6 +18,12 @@
       "type": "boolean",
       "title": "Highlight shell commands",
       "description": "In the compact and input details, draw a Bash or PowerShell row's command highlighted: the shell, and each heredoc body, here-string or multi-line -c argument in its own language",
+      "default": true
+    },
+    "numberInputLines": {
+      "type": "boolean",
+      "title": "Number command lines",
+      "description": "Where a Bash or PowerShell command is drawn highlighted, number its lines in a gutter, counting the whole command, heredocs and here-strings included",
       "default": true
     },
     "numberRows": {

@@ -78,6 +78,12 @@ language in that language, on rows of its own:
 - a multi-line `-c`/`-e` argument (`python -c "…"`, `node -e '…'`); a
   one-line one stays in the shell's row.
 
+A dim gutter numbers the lines, counting the whole command, so a heredoc's
+body goes on with the shell's count and a shell error's `line 4` is the row
+marked 4; a block opening mid-line shares that line's number. Code in another
+language than the shell, plain text included, is set two columns in, its
+numbers with it.
+
 Shell code inside another shell (`bash -c '…'`, `ssh host '…'`, `pwsh -c
 "…"`) is split again by that shell's rules. A heredoc nobody reads as code (a
 commit message) is plain text. The row's line heads it, the code under it
@@ -85,10 +91,10 @@ behind a dim bar:
 
 ```
   Dump the config · 81 → 2.4k chars · 2.3s
-  ▎ cd src && uv run python - <<'EOF'
-  ▎ import json
-  ▎ print(json.dumps(config))
-  ▎ EOF
+  ▎ 1 cd src && uv run python - <<'EOF'
+  ▎   2 import json
+  ▎   3 print(json.dumps(config))
+  ▎ 4 EOF
 ```
 
 `full` draws the engine's own row.
@@ -115,8 +121,9 @@ ignored):
 
 `numberRows`, on by default, numbers the rows in ctrl+o; turn it off to drop
 the numbers. `highlightCommands`, on by default, draws commands highlighted as
-above; turn it off for the engine's own row in every detail. Set them the same
-way.
+above; turn it off for the engine's own row in every detail.
+`numberInputLines`, on by default, numbers a highlighted command's lines; turn
+it off for no gutter. Set them the same way.
 
 ## Install
 
@@ -132,8 +139,13 @@ From the repository's root:
 
 ```
 claude plugin validate tool-status
-claude plugin test tool-status
+npm install      # once: TypeScript and Prettier
+npm run check    # typecheck, formatting, then the tests
+npm run format   # rewrite the code in the repository's style
 ```
+
+The typecheck reads the engine's types from `.claude-plugin/types/`, which
+the engine writes and git ignores.
 
 Loaded from a folder (`--plugin-dir`, `CLAUDE_CODE_PLUGIN_DIRS`), its options
 are keyed `tool-status@inline`.

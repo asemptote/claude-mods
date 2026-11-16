@@ -1,6 +1,6 @@
 // What the hooks draw, from plain values: no `$`, so the tests call it directly.
 
-import type { Detail } from '../types'
+import type { Detail, Tally } from '../types'
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
 
@@ -137,8 +137,7 @@ const scaled = (n: number, size: number, unit: string) => {
 }
 
 /** A count cut short: exact under a hundred, then `0.1k`, `1.2k`, `31k`, `1.2M`. */
-export const abbreviated = (n: number): string =>
-  n < 100 ? String(n) : n < 999_500 ? scaled(n, 1e3, 'k') : scaled(n, 1e6, 'M')
+export const abbreviated = (n: number): string => (n < 100 ? String(n) : n < 999_500 ? scaled(n, 1e3, 'k') : scaled(n, 1e6, 'M'))
 
 const chars = (n: number) => `${abbreviated(n)} ${n === 1 ? 'char' : 'chars'}`
 
@@ -160,32 +159,40 @@ export type Row = {
   toolResults?: readonly unknown[]
 }
 
+/** A session's count before any prompt. */
+export const FRESH: Tally = { count: 0, isAnswered: true }
+
+// The numbering's rules, in one place: the live hooks step through them as
+// the turn runs, and `numberCalls` as it reads a transcript. A prompt starts a
+// count only after an answer: one after a tool result or an interruption, or
+// sent mid-turn, goes on with it.
+export const onPrompt = (tally: Tally, text: string): Tally => (tally.isAnswered && text.trim() !== '' ? { ...tally, count: 0 } : tally)
+/** A call takes the next number; its turn is not answered yet. */
+export const onCall = (tally: Tally): Tally => ({ count: tally.count + 1, isAnswered: false })
+/** A turn settles: answered, or cut short (an abort, a result the model has yet to read). */
+export const onSettle = (tally: Tally, isAnswered: boolean): Tally => ({ ...tally, isAnswered })
+
 /** The transcript's calls numbered, and where the count stands at its end. */
-export type Numbered = {
-  numbers: Map<string, number>
-  count: number
-  /** Whether the last turn was answered, so the next prompt counts from 1. */
-  isAnswered: boolean
-}
+export type Numbered = Tally & { numbers: Map<string, number> }
 
 const INTERRUPTED = '[Request interrupted by user'
 
 // Each call's place among the calls since its prompt, from 1, read from the
-// transcript for the calls this process did not see run. A prompt starts a
-// count only after an answer (or opening the transcript): one after a tool
-// result or an interruption goes on with the count, as it does live.
+// transcript for the calls this process did not see run.
 export function numberCalls(rows: readonly Row[]): Numbered {
   const numbers = new Map<string, number>()
-  let count = 0
-  let isAnswered = true
+  let tally = FRESH
   for (const row of rows) {
     if (row.role === 'assistant') {
-      for (const use of row.toolUses) numbers.set(use.tool_use_id, ++count)
-      isAnswered = row.toolUses.length === 0
-    } else if ((row.toolResults?.length ?? 0) > 0 || row.text.startsWith(INTERRUPTED)) isAnswered = false
-    else if (isAnswered && row.text.trim() !== '') count = 0
+      for (const use of row.toolUses) {
+        tally = onCall(tally)
+        numbers.set(use.tool_use_id, tally.count)
+      }
+      if (row.toolUses.length === 0) tally = onSettle(tally, true)
+    } else if ((row.toolResults?.length ?? 0) > 0 || row.text.startsWith(INTERRUPTED)) tally = onSettle(tally, false)
+    else tally = onPrompt(tally, row.text)
   }
-  return { numbers, count, isAnswered }
+  return { ...tally, numbers }
 }
 
 // Each multi-line string, and each run of strings (a hunk's lines, a list of

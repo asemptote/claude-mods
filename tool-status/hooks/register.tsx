@@ -1,10 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput, RenderPropsOf, Timer } from 'claude-code'
 
-import type { Detail, LoopActivity, Run } from '../types'
+import type { Detail, LoopActivity, Run, Tally } from '../types'
 import {
   DETAIL_OPTIONS,
   DETAILS,
+  FRESH,
   INPUT_LINES,
   OUTPUT_LINES,
   age,
@@ -14,13 +15,17 @@ import {
   firstLine,
   lineCount,
   numberCalls,
+  onCall,
+  onPrompt,
+  onSettle,
   parseDetail,
   sizeOf,
   sizeText,
   stepDetail,
   took,
 } from './format'
-import { cutSegments, splitCommand } from './highlight'
+import type { Numbered } from './format'
+import { blockIndents, cutSegments, splitCommand } from './highlight'
 import type { Shell } from './highlight'
 
 const loops = atom({ plugin: 'tool-status', key: 'loops' } as const, {})
@@ -29,6 +34,9 @@ const now = atom({ plugin: 'tool-status', key: 'now' } as const, 0)
 const INITIAL_DETAIL: Detail = 'none'
 const detail = atom({ plugin: 'tool-status', key: 'detail' } as const, INITIAL_DETAIL)
 const epoch = atom({ plugin: 'tool-status', key: 'epoch' } as const, 0)
+// Held by the host, so a hot reload goes on with the count; `null` until the
+// session's first count, or a resumed session's transcript read.
+const tally = atom({ plugin: 'tool-status', key: 'tally' } as const, null)
 // Families: one member per tool call, by its tool_use_id.
 const VIEWS = { plugin: 'tool-status', key: 'views' } as const
 const CALLS = { plugin: 'tool-status', key: 'calls' } as const
@@ -104,50 +112,34 @@ const ensureTicker = ($: EngineInterface) => {
   ticker ??= $.clock.every(1000, () => void tick($))
 }
 
-// The main loop's calls since the prompt, each numbered as it starts. A
-// prompt counts from 1 only after an answered turn: one after an interruption
-// goes on with the count, as does one sent mid-turn, which starts no turn.
-let callCount = 0
-let isAnswered = true
+// The transcript numbered, read once per load: every call this process did
+// not see run (a resumed session's) was in it before the process started, and
+// every call it did see has its record. A cache, lost with a reload and read
+// again; unread, it numbers nothing.
+let fromTranscript: Promise<Numbered | undefined> | undefined
+const readTranscript = ($: EngineInterface) => (fromTranscript ??= $.session.messages().then(numberCalls, () => undefined))
 
-// Numbers for the calls this process did not see run (a resumed session's),
-// read from the transcript again only for a row it has not been asked about:
-// one chain, so the rows drawn together share one read.
-let fromTranscript: Promise<Map<string, number>> = Promise.resolve(new Map())
-const asked = new Set<string>()
+// The main loop's count steps through one chain, so parallel calls take their
+// numbers in the order they were made, though each write is a round trip.
+let counting: Promise<unknown> = Promise.resolve()
 
-function transcriptNumber($: EngineInterface, id: string): Promise<number | undefined> {
-  if (!asked.has(id)) {
-    asked.add(id)
-    fromTranscript = fromTranscript.then(async known => {
-      if (known.has(id)) return known
-      try {
-        return numberCalls(await $.session.messages()).numbers
-      } catch {
-        return known
-      }
-    })
-  }
-  return fromTranscript.then(known => known.get(id))
+function stepTally($: EngineInterface, step: (current: Tally) => Tally): Promise<Tally> {
+  // What a step writes is never `null`, though the atom's type allows it.
+  const stepped = counting.then(() => update($, tally, current => step(current ?? FRESH))).then(written => written ?? FRESH)
+  counting = stepped.catch(() => {})
+  return stepped
 }
 
-// Where the count stands at the transcript's end, so a reload or a resume
-// goes on with it; unread, it starts over.
-async function resumeCount($: EngineInterface) {
-  try {
-    const numbered = numberCalls(await $.session.messages())
-    callCount = numbered.count
-    isAnswered = numbered.isAnswered
-    fromTranscript = Promise.resolve(numbered.numbers)
-  } catch {
-    // The transcript unread, the next prompt counts from 1.
-  }
-}
+// The engine's tool row opens with a blank line of top margin that no prop
+// turns off. Past `none` the row is pulled up over it, so the line heading
+// the row sits right on it. Should the engine drop that margin, the line would
+// cover the row's first line: change it here alone.
+const ENGINE_ROW_TOP_MARGIN = 1
 
 // The tools whose rows draw their command highlighted, by the shell it is in.
 const SHELLS: Record<string, Shell | undefined> = { Bash: 'bash', PowerShell: 'powershell' }
 
-const SEPARATOR: Run ={ text: ' · ', color: null, dim: true }
+const SEPARATOR: Run = { text: ' · ', color: null, dim: true }
 const dim = (text: string): Run => ({ text, color: null, dim: true })
 
 // The rule closing an expanded row, under its output (or its input, where no
@@ -190,12 +182,20 @@ export const register: Register = (on, options) => {
   const requireBashDescription = options.requireBashDescription === true
   const numberRows = options.numberRows === true
   const highlightCommands = options.highlightCommands === true
+  const numberInputLines = options.numberInputLines === true
 
   on('session.start', async ($, e, next) => {
     const stored = await $.store.get(STORE_KEY)
     const chosen = (typeof stored === 'string' && parseDetail(stored)) || INITIAL_DETAIL
     await update($, detail, () => chosen)
-    if (numberRows) await resumeCount($)
+    // A resumed session goes on with its transcript's count; a hot reload,
+    // whose count the host kept, with that.
+    if (numberRows && (await read($, tally)) === null) {
+      const numbered = await readTranscript($)
+      await stepTally($, current => (numbered === undefined ? current : { count: numbered.count, isAnswered: numbered.isAnswered }))
+    }
+    // A reload cancelled the ticker; it stops itself again if nothing runs.
+    ensureTicker($)
     await $.command.register({
       name: 'tool-detail',
       description: 'How much of each tool call the transcript shows: none, compact, input or full; the next one without an argument',
@@ -222,7 +222,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined && e.text !== '' && isAnswered) callCount = 0
+    if (numberRows && e.agentId === undefined) await stepTally($, current => onPrompt(current, e.text))
     await setLoop($, e.agentId ?? MAIN, () => undefined)
     return next(e)
   })
@@ -230,7 +230,7 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     // Numbered first, so parallel calls take theirs in the order they were
     // made, and a refused call, whose row is drawn too, takes one.
-    const n = e.agentId === undefined ? ++callCount : undefined
+    const n = numberRows && e.agentId === undefined ? (await stepTally($, onCall)).count : undefined
     const own = (e as { description?: unknown }).description
     if (requireBashDescription && e.tool === 'Bash' && (typeof own !== 'string' || own.trim() === '')) {
       return { deny: MISSING_DESCRIPTION }
@@ -272,7 +272,7 @@ export const register: Register = (on, options) => {
     })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) isAnswered = !e.isAborted
+    if (numberRows && e.agentId === undefined) await stepTally($, current => onSettle(current, !e.isAborted))
     await setLoop($, e.agentId ?? MAIN, () => undefined)
     return next(e)
   })
@@ -330,7 +330,14 @@ export const register: Register = (on, options) => {
     const ms = record?.endedAt != null ? record.endedAt - record.startedAt : undefined
     // From the stored result, so rows of a resumed session count too.
     const diff = !isRunning && !isInterrupted && !isErrored ? diffOf(output) : undefined
-    const n = numberRows && e.props.isExpanded === true ? (record?.n ?? (await transcriptNumber($, e.requestId))) : undefined
+    // A call this process saw run has its record, numbered or (a subagent's)
+    // not; only one it did not see is looked for in the transcript.
+    const n =
+      numberRows && e.props.isExpanded === true
+        ? record !== undefined
+          ? record.n
+          : (await readTranscript($))?.numbers.get(e.requestId)
+        : undefined
 
     const name = describe(tool, input).text
     const parts: Run[][] = [
@@ -369,25 +376,32 @@ export const register: Register = (on, options) => {
 
     // A Bash or PowerShell command drawn by the mod, highlighted: the shell,
     // and each heredoc body, here-string or multi-line `-c` in its own
-    // language. `full` keeps the engine's row.
+    // language, numbered by the command's lines when asked. `full` keeps
+    // the engine's row.
     const command = (input as { command?: unknown } | null)?.command
     const shell = SHELLS[tool]
     if (highlightCommands && shell !== undefined && shown !== 'full' && typeof command === 'string') {
       const all = splitCommand(command, shell)
       const { segments, hidden } = shown === 'compact' ? cutSegments(all, INPUT_LINES) : { segments: all, hidden: 0 }
       const { Code, Text } = $.ui.resolve(e)
-      // The line heads the row, the code under it behind a dim bar.
+      const indents = blockIndents(segments, shell, numberInputLines)
+      // The line heads the row, the code under it behind a dim bar, each
+      // block set in so the gutters' numbers end in one column per level, a
+      // block in another language a level in. A gutter opens with a space of
+      // its own, so the bar needs no padding beside it.
       return (
         <Box flexDirection="column">
           {line}
-          <Box flexDirection="column" marginLeft={2} paddingLeft={1} borderStyle="quote" borderDimColor>
+          <Box flexDirection="column" marginLeft={2} paddingLeft={numberInputLines ? 0 : 1} borderStyle="quote" borderDimColor>
             {segments.map((s, i) => (
-              <Code
-                key={`code-${i}`}
-                source={s.text}
-                {...(s.language !== undefined && { language: s.language })}
-                {...(s.path !== undefined && { path: s.path })}
-              />
+              <Box key={`code-${i}`} paddingLeft={indents[i] ?? 0}>
+                <Code
+                  source={s.text}
+                  {...(numberInputLines && { startLine: s.line })}
+                  {...(s.language !== undefined && { language: s.language })}
+                  {...(s.path !== undefined && { path: s.path })}
+                />
+              </Box>
             ))}
             {hidden > 0 && <Text dimColor>{`… +${hidden} lines`}</Text>}
           </Box>
@@ -416,7 +430,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column-reverse">
         {rule}
-        <Box flexDirection="column" marginTop={-1}>
+        <Box flexDirection="column" marginTop={-ENGINE_ROW_TOP_MARGIN}>
           {await next({ ...e, props })}
         </Box>
         {line}

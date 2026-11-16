@@ -14,6 +14,9 @@ export type FinishedCall = {
 }
 export type LoopActivity = { running: RunningCall[]; last: FinishedCall | null }
 
+/** Where the main loop's count stands: its calls since the prompt, and whether the last turn was answered. */
+export type Tally = { count: number; isAnswered: boolean }
+
 /** A click's choice for one row, standing while `epoch` is unchanged. */
 export type RowView = { detail: Detail; epoch: number }
 /**
@@ -37,6 +40,8 @@ declare module 'claude-code' {
       views: StateFamily<RowView>
       /** Per tool call, by its tool_use_id. */
       calls: StateFamily<CallRecord>
+      /** The main loop's count, `null` until this session's first count or transcript read. */
+      tally: Tally | null
     }
   }
 }
