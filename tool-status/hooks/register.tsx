@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderInput, RenderPropsOf, Timer } from 'claude-code'
+import type { BuiltinToolInputs, EngineInterface, Register, RenderInput, RenderPropsOf, Timer } from 'claude-code'
 
 import type { Detail, LoopActivity, Run, Tally } from '../types'
 import {
@@ -135,6 +135,31 @@ function stepTally($: EngineInterface, step: (current: Tally) => Tally): Promise
 // the row sits right on it. Should the engine drop that margin, the line would
 // cover the row's first line: change it here alone.
 const ENGINE_ROW_TOP_MARGIN = 1
+
+// The tools whose row the engine draws empty, as of Claude Code 2.1.325: their
+// `renderToolUseMessage` answers null, or their `userFacingName` is empty.
+// Pulled up over a margin they do not have, the line would go with them, so
+// their rows are the line alone in every detail; what they return still
+// shows under it, as `ToolResult`. Typed by this build's tool names, so one an
+// update renames or drops fails the typecheck; SubagentHandback is the
+// engine's too, though builds that do not offer it leave it out of their types.
+const EMPTY_ROWS: ReadonlySet<string> = new Set<keyof BuiltinToolInputs | 'SubagentHandback'>([
+  'AskUserQuestion',
+  'EndConversation',
+  'EnterPlanMode',
+  'ExitPlanMode',
+  'ListAgents',
+  'SendUserFile',
+  'SendUserMessage',
+  'ShowOnboardingRolePicker',
+  'SubagentHandback',
+  'TaskCreate',
+  'TaskGet',
+  'TaskList',
+  'TaskUpdate',
+  'TodoWrite',
+  'ToolSearch',
+])
 
 // The tools whose rows draw their command highlighted, by the shell it is in.
 const SHELLS: Record<string, Shell | undefined> = { Bash: 'bash', PowerShell: 'powershell' }
@@ -373,6 +398,14 @@ export const register: Register = (on, options) => {
     if (shown === 'none') return line
     const { Box } = $.ui.resolve(e)
     const rule = shown === 'input' ? ruleOf($, e) : null
+    if (EMPTY_ROWS.has(tool)) {
+      return (
+        <Box flexDirection="column">
+          {line}
+          {rule}
+        </Box>
+      )
+    }
 
     // A Bash or PowerShell command drawn by the mod, highlighted: the shell,
     // and each heredoc body, here-string or multi-line `-c` in its own

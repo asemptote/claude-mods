@@ -732,6 +732,20 @@ test('highlightCommands off leaves the command to the engine row', { options: { 
   expect(await textsOf($, toolRow('h1', 'Bash', { command: PY_HEREDOC, description: 'Dump it' }))).toEqual(['rule', PY_HEREDOC, '  Dump it| · |81 chars'])
 })
 
+test("a tool whose row the engine draws empty is the line alone in every detail, never the engine's row", async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+  const row = toolRow('la1', 'ListAgents', {}, { output: 'Peer sessions (0)' })
+  for (const [detail, expected] of [
+    ['compact', ['  ListAgents| · |→ 17 chars']],
+    ['input', ['rule', '  ListAgents| · |→ 17 chars']],
+    ['full', ['  ListAgents| · |→ 17 chars']],
+  ] as const) {
+    await toolDetail($, detail)
+    expect(await textsOf($, row)).toEqual(expected)
+  }
+})
+
 const childTypes = (box: { children: unknown[] }) => box.children.map(child => (child as { type?: string }).type)
 
 test('past none the line heads the row with no blank line, a rule closes it, and the line stays on top to be clicked', async ($, on) => {
