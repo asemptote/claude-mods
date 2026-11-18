@@ -49,13 +49,14 @@ subagent's calls are not numbered:
   3. Edit register.tsx · +12/-3
 ```
 
-`/tool-detail [none|compact|input|full]` sets how much of every row shows:
+`/tool-detail [none|compact|input|output|full]` sets how much of every row shows:
 
 | detail | the row draws |
 | --- | --- |
 | `none` (the default) | the line alone |
 | `compact` | inputs cut to 10 lines, outputs to 5 |
 | `input` | inputs and the line, no outputs |
+| `output` | outputs and the line, no inputs |
 | `full` | the engine's own row, and the line |
 
 - Without an argument it steps to the next one; the choice is kept across
@@ -101,8 +102,8 @@ behind a dim bar:
 
 **Messages.** In the ctrl+o transcript, a message another agent, teammate,
 session or channel sent folds the same way, to a line naming its sender with
-its first line and length; `compact` cuts the body to 10 lines, `input` and
-`full` show it whole, and a click steps it as it does a tool row:
+its first line and length; `compact` cuts the body to 10 lines, `input`,
+`output` and `full` show it whole, and a click steps it as it does a tool row:
 
 ```
   Explore: Found three call sites of setLoop · 42 lines

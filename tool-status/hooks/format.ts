@@ -223,7 +223,8 @@ export const DETAILS: Record<Detail, string> = {
   none: 'the line alone',
   compact: `inputs cut to ${INPUT_LINES} lines, outputs to ${OUTPUT_LINES}`,
   input: 'inputs and the line, no outputs',
-  full: 'tool rows drawn in full',
+  output: 'outputs and the line, no inputs',
+  full: "the engine's own rows, in full",
 }
 const CYCLE = Object.keys(DETAILS) as Detail[]
 export const DETAIL_OPTIONS = CYCLE.join('|')

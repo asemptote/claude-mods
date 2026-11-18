@@ -19,7 +19,12 @@ const spinner = (props: Partial<{ message: string | null; mode: 'thinking' | 'to
     props: { word: 'Sauteing', message: null, suffix: '…', mode: 'thinking', ...props },
   }) as const
 
-const toolRow = (id: string, tool: string, input: unknown, more: { isErrored?: boolean; isRunning?: boolean; isExpanded?: boolean; output?: unknown } = {}) =>
+const toolRow = (
+  id: string,
+  tool: string,
+  input: unknown,
+  more: { isErrored?: boolean; isRunning?: boolean; isInterrupted?: boolean; isExpanded?: boolean; output?: unknown } = {},
+) =>
   ({
     plugin: PLUGIN,
     surface: 'terminal',
@@ -224,7 +229,7 @@ const result = {
 } as const
 const rowsOf = async ($: Engine) => ({ row: await textsOf($, row), result: await textsOf($, result) })
 
-test('/tool-detail draws none, compact, input and full rows, steps without an argument, and is kept across sessions', async ($, on) => {
+test('/tool-detail draws none, compact, input, output and full rows, steps without an argument, and is kept across sessions', async ($, on) => {
   engine(on)
   await $.session.start(START)
 
@@ -234,10 +239,12 @@ test('/tool-detail draws none, compact, input and full rows, steps without an ar
   expect(await rowsOf($)).toEqual({ row: [lines(9, 'cmd'), '… +6 lines', '  Build it| · |80 chars'], result: [`${lines(4, 'out')}\n… +5 lines`, 'rule'] })
   expect((await toolDetail($, '')).text).toContain('Tool detail: input')
   expect(await rowsOf($)).toEqual({ row: [lines(15, 'cmd'), 'rule', '  Build it| · |80 chars'], result: [] })
+  expect((await toolDetail($, '')).text).toBe('Tool detail: output (outputs and the line, no inputs).')
+  expect(await rowsOf($)).toEqual({ row: ['  Build it| · |80 chars'], result: [lines(9, 'out'), 'rule'] })
   expect((await toolDetail($, 'FULL')).text).toContain('Tool detail: full')
   expect(await rowsOf($)).toEqual({ row: [lines(15, 'cmd'), '  Build it| · |80 chars'], result: [lines(9, 'out'), 'rule'] })
   expect((await toolDetail($, '')).text).toContain('Tool detail: none')
-  expect((await toolDetail($, 'maybe')).text).toBe('Usage: /tool-detail [none|compact|input|full]')
+  expect((await toolDetail($, 'maybe')).text).toBe('Usage: /tool-detail [none|compact|input|output|full]')
 
   await toolDetail($, 'input')
   await $.session.start(START)
@@ -286,8 +293,9 @@ test("ctrl+o folds another party's message to its sender and first line, and a c
 })
 
 test("a click on a row's line steps that row: left forward, right or ctrl+left back, inverted under the pointer", async ($, on) => {
-  expect((['none', 'compact', 'input', 'full'] as const).map(d => stepDetail(d, 1))).toEqual(['compact', 'input', 'full', 'none'])
-  expect((['none', 'compact', 'input', 'full'] as const).map(d => stepDetail(d, -1))).toEqual(['full', 'none', 'compact', 'input'])
+  const cycle = ['none', 'compact', 'input', 'output', 'full'] as const
+  expect(cycle.map(d => stepDetail(d, 1))).toEqual(['compact', 'input', 'output', 'full', 'none'])
+  expect(cycle.map(d => stepDetail(d, -1))).toEqual(['full', 'none', 'compact', 'input', 'output'])
   engine(on)
   await $.session.start(START)
 
@@ -374,8 +382,12 @@ test('an edit row shows +added/-removed in every detail, counted from the uncut 
     const rule = detail === 'input' ? ['rule'] : []
     expect(await textsOf($, edit)).toEqual([...rule, 'Edit(…)', '  Edit a.ts| · |+4|/|-2'])
   }
-  await toolDetail($, 'none')
-  expect(await textsOf($, edit)).toEqual(['  Edit a.ts| · |+4|/|-2'])
+  for (const detail of ['none', 'output']) {
+    await toolDetail($, detail)
+    expect(await textsOf($, edit)).toEqual(['  Edit a.ts| · |+4|/|-2'])
+    // With no engine row drawn, the line says a call was interrupted.
+    expect(await textsOf($, toolRow(`i-${detail}`, 'Edit', input, { isInterrupted: true }))).toEqual(['  Edit a.ts| · |interrupted'])
+  }
   // A failed edit draws no counts.
   expect(await textsOf($, toolRow('e2', 'Edit', input, { isErrored: true, output: 'Error: string not found' }))).toEqual(['  Edit a.ts| · |✗ failed'])
 })
@@ -658,7 +670,7 @@ test('blocks are cut to a number of lines in all, saying how many are left out',
   })
 })
 
-test('a shell row past none draws its command highlighted, Bash and PowerShell alike; full keeps the engine row', async ($, on) => {
+test('a shell row past none draws its command highlighted, Bash and PowerShell alike, but not in output; full keeps the engine row', async ($, on) => {
   engine(on)
   await $.session.start(START)
   await toolDetail($, 'input')
@@ -673,6 +685,10 @@ test('a shell row past none draws its command highlighted, Bash and PowerShell a
   const ps = await $.ui.mount(toolRow('p1', 'PowerShell', { command: "@'\nprint(1)\n'@ | python -", description: 'Run it' }))
   expect((await ps.findAll({ type: 'Code' })).map(c => c.props.language)).toEqual(['powershell', 'python', 'powershell'])
   await ps.unmount()
+
+  // In output the command is left out, the line alone over the output.
+  await toolDetail($, 'output')
+  expect(await textsOf($, bash)).toEqual(['  Dump it| · |81 chars'])
 
   await toolDetail($, 'full')
   expect(await textsOf($, bash)).toEqual([PY_HEREDOC, '  Dump it| · |81 chars'])
@@ -747,6 +763,7 @@ test("a tool whose row the engine draws empty is the line alone in every detail,
   for (const [detail, expected] of [
     ['compact', ['  ListAgents| · |→ 17 chars']],
     ['input', ['rule', '  ListAgents| · |→ 17 chars']],
+    ['output', ['  ListAgents| · |→ 17 chars']],
     ['full', ['  ListAgents| · |→ 17 chars']],
   ] as const) {
     await toolDetail($, detail)
@@ -771,7 +788,7 @@ test('past none the line heads the row with no blank line, a rule closes it, and
   expect(childTypes(outer!)).toEqual(['Box', 'Client'])
   expect(engineRow!.props.marginTop).toBe(-1)
   await full.unmount()
-  // The output closes with the rule in compact and full, the input in input.
+  // The output closes with the rule in compact, output and full, the input in input.
   expect(await textsOf($, { ...result, requestId: 'o1', props: { ...result.props, tool_use_id: 'o1' } })).toEqual([lines(9, 'out'), 'rule'])
   await toolDetail($, 'input')
   const input = await $.ui.mount(edit)

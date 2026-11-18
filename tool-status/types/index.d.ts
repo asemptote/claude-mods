@@ -1,5 +1,5 @@
 /** How much of a tool call its transcript row draws, least first. */
-export type Detail = 'none' | 'compact' | 'input' | 'full'
+export type Detail = 'none' | 'compact' | 'input' | 'output' | 'full'
 
 /** A call in flight, as its loop's spinner names it. */
 export type RunningCall = { id: string; label: string; detail: string | null; startedAt: number }

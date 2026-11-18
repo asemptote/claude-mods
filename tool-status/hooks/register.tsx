@@ -223,7 +223,8 @@ export const register: Register = (on, options) => {
     ensureTicker($)
     await $.command.register({
       name: 'tool-detail',
-      description: 'How much of each tool call the transcript shows: none, compact, input or full; the next one without an argument',
+      description:
+        'How much of each tool call the transcript shows: none, compact, input, output or full; the next one without an argument',
       argumentHint: `[${DETAIL_OPTIONS}]`,
       immediate: true,
     })
@@ -384,7 +385,8 @@ export const register: Register = (on, options) => {
     if (size !== undefined) parts.push([dim(size)])
     if (isRunning) parts.push([dim(record ? age((await read($, now)) - record.startedAt) : 'running')])
     else if (isInterrupted) {
-      if (shown === 'none') parts.push([dim('interrupted')])
+      // Where the engine's row is not drawn, the line says it.
+      if (shown === 'none' || shown === 'output') parts.push([dim('interrupted')])
     } else if (isErrored) {
       parts.push([{ text: ms === undefined ? '✗ failed' : `✗ failed after ${took(ms)}`, color: 'error', dim: false }])
     } else if (ms !== undefined && ms >= 1000) parts.push([dim(took(ms))])
@@ -392,10 +394,11 @@ export const register: Register = (on, options) => {
     const runs = parts.flatMap((part, i) => (i === 0 ? part : [SEPARATOR, ...part]))
 
     const line = lineOf($, e, runs)
-    // In `none` the rows stack, a line each. Past it, a row is closed by a
+    // In `none` the rows stack, a line each; in `output` the line stands
+    // alone over the output, with no input. Past `none` a row is closed by a
     // rule: under its input here in `input`, under its output (`ToolResult`)
-    // in `compact` and `full`.
-    if (shown === 'none') return line
+    // in `compact`, `output` and `full`.
+    if (shown === 'none' || shown === 'output') return line
     const { Box } = $.ui.resolve(e)
     const rule = shown === 'input' ? ruleOf($, e) : null
     if (EMPTY_ROWS.has(tool)) {
@@ -409,8 +412,8 @@ export const register: Register = (on, options) => {
 
     // A Bash or PowerShell command drawn by the mod, highlighted: the shell,
     // and each heredoc body, here-string or multi-line `-c` in its own
-    // language, numbered by the command's lines when asked. `full` keeps
-    // the engine's row.
+    // language, numbered by the command's lines when asked: cut in
+    // `compact`, whole in `input`. `full` keeps the engine's row.
     const command = (input as { command?: unknown } | null)?.command
     const shell = SHELLS[tool]
     if (highlightCommands && shell !== undefined && shown !== 'full' && typeof command === 'string') {
@@ -473,8 +476,8 @@ export const register: Register = (on, options) => {
 
   // A message another party sent (an agent, a teammate, a session, a channel)
   // folds in ctrl+o as a tool row does, to a line naming the sender with the
-  // message's first line; `compact` cuts the body, `input` and `full` show it
-  // whole. The main view draws its own one line.
+  // message's first line; `compact` cuts the body, `input`, `output` and
+  // `full` show it whole. The main view draws its own one line.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     const { text, from, isExpanded } = e.props
     if (!isExpanded || from === undefined) return next(e)
@@ -494,8 +497,9 @@ export const register: Register = (on, options) => {
     )
   })
 
-  // The result under a row: cut in `compact`, gone in `input` and `none`;
-  // where it shows, the rule closing the row follows it.
+  // The result under a row: cut in `compact`, gone in `input` and `none`,
+  // whole in `output` and `full`; where it shows, the rule closing the row
+  // follows it.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     const shown = await detailOf($, e.requestId)
     const { Box } = $.ui.resolve(e)
